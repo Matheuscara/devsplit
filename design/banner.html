@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8" />
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 1280px; height: 400px; }
+  body {
+    background: radial-gradient(120% 140% at 18% 18%, #15171a 0%, #0b0c0e 60%);
+    font-family: 'Inter', system-ui, sans-serif;
+    color: #e6e7e9;
+    display: flex;
+    align-items: center;
+    gap: 44px;
+    padding: 0 72px;
+    overflow: hidden;
+    position: relative;
+  }
+  .mark { flex: 0 0 auto; width: 132px; height: 132px; filter: drop-shadow(0 8px 28px rgba(52,211,153,.18)); }
+  .left { display: flex; flex-direction: column; gap: 14px; max-width: 660px; }
+  .word { font-size: 92px; font-weight: 800; letter-spacing: -3px; line-height: 1; }
+  .word .dev { color: #e6e7e9; }
+  .word .split { color: #34d399; }
+  .tag { font-size: 23px; font-weight: 500; color: #aab0b6; line-height: 1.35; letter-spacing: -.2px; }
+  .tag b { color: #d6d8db; font-weight: 600; }
+  .pill { margin-top: 6px; display: inline-flex; gap: 8px; align-items: center; font-size: 13px; color: #9aa0a6; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #34d399; box-shadow: 0 0 10px #34d399; }
+
+  /* diagrama sutil à direita */
+  .diagram { margin-left: auto; flex: 0 0 auto; width: 320px; font-size: 14px; color: #9aa0a6; }
+  .row { display: flex; align-items: center; gap: 10px; padding: 9px 12px; border: 1px solid #23262b; border-radius: 10px; background: rgba(21,23,26,.6); margin-bottom: 8px; }
+  .row code { font-family: 'Inter', monospace; color: #c8cbcf; }
+  .badge { margin-left: auto; font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px; }
+  .b-local { color: #0b0c0e; background: #34d399; }
+  .b-pass { color: #9aa0a6; border: 1px solid #2d3137; }
+</style>
+</head>
+<body>
+  <svg class="mark" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+    <defs><linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#15171a"/><stop offset="1" stop-color="#0b0c0e"/></linearGradient></defs>
+    <rect width="1024" height="1024" rx="224" fill="url(#bg)" stroke="#23262b" stroke-width="6"/>
+    <g fill="none" stroke="#34d399" stroke-width="78" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M250 512 H468"/><path d="M468 512 C 600 512, 624 300, 770 300"/><path d="M468 512 C 600 512, 624 724, 770 724"/>
+    </g>
+    <circle cx="250" cy="512" r="64" fill="#34d399"/>
+    <circle cx="770" cy="300" r="62" fill="#34d399"/>
+    <circle cx="770" cy="724" r="58" fill="#0b0c0e" stroke="#34d399" stroke-width="40"/>
+  </svg>
+
+  <div class="left">
+    <div class="word"><span class="dev">dev</span><span class="split">split</span></div>
+    <div class="tag">Rode local <b>só o serviço que você está mexendo</b> — o resto faz passthrough pro stage real. Sem Docker, sem mudar o front.</div>
+    <div class="pill"><span class="dot"></span> proxy local · split por path-prefix · TLS confiável</div>
+  </div>
+
+  <div class="diagram">
+    <div class="row"><code>/transporte</code> <span class="badge b-local">local :3000</span></div>
+    <div class="row"><code>/auth</code> <span class="badge b-local">local :3001</span></div>
+    <div class="row"><code>/*</code> <span class="badge b-pass">stage real</span></div>
+  </div>
+</body>
+</html>

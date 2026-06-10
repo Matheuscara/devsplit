@@ -5,13 +5,17 @@
       <stop offset="1" stop-color="#0b0c0e"/>
     </linearGradient>
   </defs>
-  <rect x="0" y="0" width="1024" height="1024" rx="224" fill="url(#bg)"/>
-  <g fill="none" stroke="#34d399" stroke-width="76" stroke-linecap="round" stroke-linejoin="round">
-    <path d="M250 512 H470"/>
-    <path d="M470 512 C 600 512, 620 300, 774 300"/>
-    <path d="M470 512 C 600 512, 620 724, 774 724"/>
+  <rect width="1024" height="1024" rx="224" fill="url(#bg)"/>
+  <!-- trilho: uma entrada que se divide em dois caminhos -->
+  <g fill="none" stroke="#34d399" stroke-width="78" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M250 512 H468"/>
+    <path d="M468 512 C 600 512, 624 300, 770 300"/>
+    <path d="M468 512 C 600 512, 624 724, 770 724"/>
   </g>
-  <circle cx="250" cy="512" r="62" fill="#34d399"/>
-  <circle cx="774" cy="300" r="56" fill="#0b0c0e" stroke="#34d399" stroke-width="40"/>
-  <circle cx="774" cy="724" r="56" fill="#0b0c0e" stroke="#34d399" stroke-width="40"/>
+  <!-- origem (o tráfego que chega) -->
+  <circle cx="250" cy="512" r="64" fill="#34d399"/>
+  <!-- caminho LOCAL (preenchido) -->
+  <circle cx="770" cy="300" r="62" fill="#34d399"/>
+  <!-- caminho PASSTHROUGH (vazado) -->
+  <circle cx="770" cy="724" r="58" fill="#0b0c0e" stroke="#34d399" stroke-width="40"/>
 </svg>
