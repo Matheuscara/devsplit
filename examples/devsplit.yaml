@@ -1,0 +1,56 @@
+# Exemplo de configuracao do devsplit (commitavel na raiz do repo do time).
+# Copie p/ a raiz do seu projeto como `devsplit.yaml` e ajuste host/portas.
+version: 1
+
+# Gateway remoto de stage a interceptar. O front continua apontando p/ esta URL.
+upstream:
+  host: api.hml.gateway.acme.com   # FQDN de stage -> vai p/ /etc/hosts (127.0.0.1)
+  kind: stage                            # stage|qa  (prod e recusado por padrao)
+  passthrough:
+    resolve: api.hml.gateway.acme.com  # re-resolvido via DNS DIRETO (ignora /etc/hosts)
+    # address: 192.0.2.10:443           # OU pin de IP fixo (dispensa o DNS)
+    sni: api.hml.gateway.acme.com      # ServerName no upstream -> cert remoto VALIDADO
+    verify: true                             # NUNCA false em stage real
+
+tls:
+  provider: mkcert        # mkcert (shell-out) | self (rcgen em-processo)
+  leaf_max_days: 825      # teto cross-platform (limite do macOS)
+
+profiles:
+  # Perfil padrao: so o microsservico de transporte roda local.
+  default:
+    routes:
+      - prefix: /transporte
+        target: http://127.0.0.1:3000
+        also: [/socket.io]        # socket.io junto do app (mesmo upstream)
+  # Dois servicos locais.
+  transporte-e-auth:
+    extends: default
+    routes:
+      - prefix: /auth
+        target: http://127.0.0.1:3001
+  # Tudo o que o time costuma mexer, local.
+  full-local:
+    extends: transporte-e-auth
+    routes:
+      - prefix: /financeiro
+        target: http://127.0.0.1:3002
+
+# Ambiente alternativo (mesmo schema de upstream); selecione na UI.
+environments:
+  qa:
+    upstream:
+      host: api.qa.gateway.acme.com
+      passthrough:
+        resolve: api.qa.gateway.acme.com
+        sni: api.qa.gateway.acme.com
+        verify: true
+
+cors:
+  enabled: true
+  allow_origins: ["https://app.hml.acme.com"]
+  allow_origins_regex: ['^https?://(localhost|127\.0\.0\.1)(:\d+)?$']
+  allow_credentials: true
+
+defaults:
+  listen: "0.0.0.0:443"

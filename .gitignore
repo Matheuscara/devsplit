@@ -1,0 +1,24 @@
+# ── Rust (build) ──
+/target/
+**/target/
+
+# ── Node / frontend ──
+node_modules/
+# dist/ e regenerado por `npm run build` (e embutido no binario em tempo de compilacao)
+app/dist/
+
+# ── Tauri (gerado) ──
+app/src-tauri/gen/
+
+# ── devsplit: artefatos de runtime ──
+*.devsplit.bak          # backup do arquivo hosts
+/devsplit.local.yaml    # overrides pessoais (portas do dev), nao versionar
+
+# ── Logs / sistema ──
+*.log
+.DS_Store
+Thumbs.db
+
+# NOTA: Cargo.lock e package-lock.json SAO versionados (apps/binarios),
+# e app/src-tauri/icons/ TAMBEM (necessarios p/ o build). devsplit.yaml na
+# raiz e a config de time (commitavel); ver examples/devsplit.yaml.

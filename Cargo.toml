@@ -1,0 +1,15 @@
+# Workspace raiz do devsplit.
+#
+# Apenas o crate `devsplit-core` (logica pura: proxy/TLS/DNS/hosts) entra no
+# workspace — ele compila e testa SEM webkit/sudo. A casca Tauri vive em `app/`
+# com seu proprio Cargo (precisa de webkit2gtk-4.1 p/ buildar) e depende deste
+# core por path. Mantemos o Tauri fora do workspace de proposito, p/ que
+# `cargo test` na raiz nao tente linkar o webview.
+[workspace]
+resolver = "2"
+members = ["crates/devsplit-core"]
+
+[workspace.package]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/devsplit/devsplit"

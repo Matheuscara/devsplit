@@ -1,0 +1,38 @@
+[package]
+name = "devsplit"
+version = "0.1.0"
+edition = "2021"
+description = "devsplit — split de trafego local de dev por path-prefix"
+default-run = "devsplit"
+
+# NOTA: este crate NAO entra no workspace raiz de proposito (ele linka o webview
+# do Tauri, que exige webkit2gtk-4.1 instalado no Linux). Build:
+#   sudo pacman -S webkit2gtk-4.1   # (Arch/CachyOS)  ou equivalente
+#   cargo install tauri-cli --version "^2"
+#   cd app && npm install && cargo tauri build   (ou `cargo tauri dev`)
+
+[lib]
+name = "devsplit_lib"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-shell = "2"
+tauri-plugin-single-instance = "2"
+tauri-plugin-autostart = "2"
+
+devsplit-core = { path = "../../crates/devsplit-core" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+arc-swap = "1"
+anyhow = "1"
+
+# Workspace proprio: desacopla do workspace raiz (que so contem o core, p/ que
+# `cargo test` na raiz nao exija webkit). Resolve o erro "believes it's in a
+# workspace when it's not" do `cargo tauri dev`. O path dep p/ o core continua ok.
+[workspace]

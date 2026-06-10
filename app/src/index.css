@@ -1,0 +1,71 @@
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap");
+@import "tailwindcss";
+
+/* Dark by default — html carries `dark`, but the palette is fixed dark anyway. */
+@theme {
+  --color-bg: #0b0c0e;
+  --color-surface: #15171a;
+  --color-surface-2: #1b1e22;
+  --color-border: #23262b;
+  --color-text: #e6e7e9;
+  --color-muted: #9aa0a6;
+  --color-accent: #34d399;
+  --color-accent-dim: #2bb588;
+  --color-warn: #f0b429;
+  --color-danger: #f05252;
+
+  --radius-md: 8px;
+
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI",
+    sans-serif;
+}
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background-color: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+}
+
+* {
+  border-color: var(--color-border);
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: 6px;
+  border: 2px solid var(--color-bg);
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Onboarding */
+@keyframes devsplit-overlay-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes devsplit-card-in {
+  from { opacity: 0; transform: translateY(10px) scale(0.985); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes devsplit-step-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}

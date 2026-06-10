@@ -1,0 +1,41 @@
+# Config ativa do devsplit (raiz do repo). Editavel pela UI e commitável p/ o time.
+# Ajuste host/portas p/ o seu ambiente.
+version: 1
+
+upstream:
+  host: api.hml.gateway.acme.com
+  kind: stage
+  passthrough:
+    resolve: api.hml.gateway.acme.com
+    # address: 192.0.2.10:443    # OU pin de IP fixo (dispensa o DNS direto)
+    sni: api.hml.gateway.acme.com
+    verify: true
+
+tls:
+  provider: mkcert
+  leaf_max_days: 825
+
+profiles:
+  default:
+    routes:
+      - prefix: /transporte
+        target: http://127.0.0.1:3000
+        also: [/socket.io]
+  transporte-e-auth:
+    extends: default
+    routes:
+      - prefix: /auth
+        target: http://127.0.0.1:3001
+  full-local:
+    extends: transporte-e-auth
+    routes:
+      - prefix: /financeiro
+        target: http://127.0.0.1:3002
+
+cors:
+  enabled: true
+  allow_origins_regex: ['^https?://(localhost|127\.0\.0\.1)(:\d+)?$']
+  allow_credentials: true
+
+defaults:
+  listen: "0.0.0.0:443"
