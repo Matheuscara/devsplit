@@ -14,6 +14,17 @@
   <img src="https://img.shields.io/badge/Windows-implementado%20(via%20CI)-9aa0a6?style=flat-square" alt="Windows">
   <img src="https://img.shields.io/badge/core-18%20testes%20%E2%9C%93-34d399?style=flat-square" alt="testes">
   <img src="https://img.shields.io/badge/Tauri%20v2-Rust%20+%20React-2d3137?style=flat-square" alt="stack">
+  <img src="https://img.shields.io/badge/licen%C3%A7a-MIT%20%2F%20Apache--2.0-2d3137?style=flat-square" alt="licença">
+</p>
+
+<p align="center">
+  <a href="#o-que-é">O que é</a> ·
+  <a href="#o-problema-que-resolve">O problema</a> ·
+  <a href="#a-interface">A interface</a> ·
+  <a href="#como-funciona-invariantes">Como funciona</a> ·
+  <a href="#rodar">Rodar</a> ·
+  <a href="#status-por-plataforma">Status</a> ·
+  <a href="#documentação">Docs</a>
 </p>
 
 ---
@@ -30,6 +41,11 @@ Um **app de desktop** que fica entre o seu navegador e o gateway HTTP de um ambi
 
 O front **não muda**: continua apontando para a URL de stage. Você liga/desliga rotas numa
 interface, e o devsplit cuida do TLS local confiável, do `/etc/hosts` e do roteamento.
+
+<p align="center">
+  <img src="design/shots/rotas.png" alt="Tela de Rotas do devsplit" width="860"><br>
+  <sub><i>Tela <b>Rotas</b>: domínio interceptado, perfil ativo, botão liga/desliga, painel de Saúde e a tabela de rotas (local × passthrough).</i></sub>
+</p>
 
 ## O problema que resolve
 
@@ -49,15 +65,47 @@ front (browser) ─▶ https://api.stage.acme.com     (no seu PC, resolve p/ 127
                    └─ /*                  ─▶ IP_REAL_DO_STAGE:443      (PASSTHROUGH, cert validado)
 ```
 
+## A interface
+
+Seis telas, foco em densidade e clareza (estilo dev-tool — Linear/Raycast).
+
+| Tela | O que faz |
+|---|---|
+| **Rotas** | Liga/desliga a interceptação, escolhe o perfil, edita as rotas (prefixo → porta local) e mostra o painel de **Saúde** (cert / hosts / `:443` / stage). |
+| **Tráfego** | Inspector ao vivo: cada requisição com método, caminho, **decisão** (local/passthrough), status e latência; **latência p50/p95 por rota**; filtro e copy-as-curl / export HAR. |
+| **Sessão** | Decodifica o JWT do header `Authorization: Bearer` visto no tráfego (claims, expiração). |
+| **Certificado** | Status da CA local (`mkcert`), algoritmo, validade, trust store; botão **Instalar certificado**. |
+| **Hosts** | O que o devsplit escreveu no `/etc/hosts` (bloco demarcado, reversível). |
+| **Config** | O `devsplit.yaml` resolvido, perfis e autostart. |
+
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="design/shots/trafego.png" alt="Inspector de tráfego ao vivo"><br>
+      <sub><i><b>Tráfego</b> — inspector ao vivo + latência por rota.</i></sub>
+    </td>
+    <td width="50%" valign="top">
+      <img src="design/shots/certificado.png" alt="Status do certificado"><br>
+      <sub><i><b>Certificado</b> — CA local confiável (mkcert), validação por SNI.</i></sub>
+    </td>
+  </tr>
+</table>
+
+> As capturas usam dados de exemplo (modo de demonstração da UI). No app real, os mesmos
+> painéis refletem o seu `devsplit.yaml` e o tráfego de verdade.
+
 ## Como funciona (invariantes)
 
 - **Transparência:** o front aponta p/ a URL de stage; o `/etc/hosts` manda o FQDN p/
   `127.0.0.1`; o devsplit termina o TLS com um cert local **confiável** (via `mkcert`).
 - **Anti-loop:** o IP real do stage é descoberto por **DNS direto** (`hickory`, nameserver
   explícito) que **ignora** o `/etc/hosts` — senão o proxy conectaria em si mesmo.
-- **Passthrough seguro:** conecta no IP real e **valida** o cert remoto contra o SNI (FQDN).
+- **Passthrough seguro:** conecta no IP real e **valida** o cert remoto contra o SNI (FQDN),
+  sem desabilitar verificação.
 - **Hot-reload:** a tabela de rotas vive num `ArcSwap`; ligar/desligar rota não derruba
   conexões em voo (inclusive WebSocket).
+- **Segurança no inspector:** headers como `cookie`/`x-api-key`/`*secret*`/`*token*` são
+  **redatados**; só `authorization` fica visível (é o que o painel de Sessão decodifica).
 - **1 prompt de senha por sessão** (Linux): elevação só para editar o `/etc/hosts` e
   liberar a `:443`. O app roda sem root.
 
@@ -93,6 +141,12 @@ cd src-tauri && cargo run
 > [`docs/getting-started.md`](./docs/getting-started.md) e
 > [`docs/troubleshooting.md`](./docs/troubleshooting.md).
 
+### Explorar a UI no navegador (dados de exemplo)
+
+```bash
+cd app && npm install && npm run dev   # http://localhost:1420 — sem backend, modo demo
+```
+
 ### Configurar
 
 Copie [`examples/devsplit.yaml`](./examples/devsplit.yaml) para a raiz do seu repo como
@@ -109,8 +163,8 @@ Copie [`examples/devsplit.yaml`](./examples/devsplit.yaml) para a raiz do seu re
 
 Build dos 3 SOs + release com instaladores: CI em
 [`.github/workflows/build.yml`](./.github/workflows/build.yml) (`tauri-action`, matriz
-`ubuntu`/`macos`/`windows`; tag `v*` → release draft). Painel completo de entregas em
-[`docs/STATUS.md`](./docs/STATUS.md).
+`ubuntu`/`macos`/`windows`; tag `v*` → release draft com `.AppImage`/`.deb`/`.dmg`/`.msi`).
+Painel completo de entregas em [`docs/STATUS.md`](./docs/STATUS.md).
 
 ## Documentação
 
@@ -125,10 +179,10 @@ Guia completo em [`docs/`](./docs/). Atalhos:
 
 ## Logo & design
 
-A marca (um fluxo que se divide em **local**, preenchido, e **passthrough**, vazado) está em
-[`design/`](./design/): `icon.svg` (fonte), `logo.png`, `banner.png`. Os ícones do app são
-gerados dela (`cargo tauri icon design/logo.png`). Mockup da UI em
-[`design/mockup.html`](./design/mockup.html).
+A marca — um fluxo que se divide em **local** (preenchido) e **passthrough** (vazado) —
+está em [`design/`](./design/): `icon.svg` (fonte), `logo.png`, `banner.png`, e as capturas
+em `design/shots/`. Os ícones do app são gerados da marca (`cargo tauri icon design/logo.png`).
+Mockup estático da UI em [`design/mockup.html`](./design/mockup.html).
 
 ## Layout
 
@@ -140,7 +194,7 @@ devsplit/
 ├── app/
 │   ├── src/                           # UI React (TypeScript)
 │   └── src-tauri/                     # casca Tauri (Rust): comandos, tray, elevação por-SO
-├── design/                            # logo, banner, ícones-fonte, mockup
+├── design/                            # logo, banner, ícones-fonte, capturas, mockup
 ├── examples/devsplit.yaml             # config de time (commitável)
 └── .github/workflows/build.yml        # CI: testa + builda os 3 SOs + release
 ```
