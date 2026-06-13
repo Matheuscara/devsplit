@@ -12,6 +12,7 @@
   <img src="https://img.shields.io/badge/Linux-rodando-34d399?style=flat-square" alt="Linux">
   <img src="https://img.shields.io/badge/macOS-implementado%20(via%20CI)-9aa0a6?style=flat-square" alt="macOS">
   <img src="https://img.shields.io/badge/Windows-implementado%20(via%20CI)-9aa0a6?style=flat-square" alt="Windows">
+  <a href="https://github.com/Matheuscara/devsplit/actions/workflows/security-scan.yml"><img src="https://github.com/Matheuscara/devsplit/actions/workflows/security-scan.yml/badge.svg" alt="security-scan"></a>
   <img src="https://img.shields.io/badge/core-18%20testes%20%E2%9C%93-34d399?style=flat-square" alt="testes">
   <img src="https://img.shields.io/badge/Tauri%20v2-Rust%20+%20React-2d3137?style=flat-square" alt="stack">
   <img src="https://img.shields.io/badge/licen%C3%A7a-MIT%20%2F%20Apache--2.0-2d3137?style=flat-square" alt="licença">
@@ -153,6 +154,37 @@ Copie [`examples/devsplit.yaml`](./examples/devsplit.yaml) para a raiz do seu re
 `devsplit.yaml` e ajuste o `upstream.host` (FQDN do stage) e os `profiles.*.routes`
 (prefixos → portas locais). Referência: [`docs/10-referencia-devsplit-yaml.md`](./docs/10-referencia-devsplit-yaml.md).
 
+## Instalar
+
+### No seu PC (Linux, sem root)
+
+```bash
+./packaging/install-local.sh        # build (--no-bundle) + binario, icones, .desktop e config
+```
+
+Poe o binario em `~/.local/bin`, registra o `.desktop` (aparece no launcher — **Super+Espaco**) e
+**copia o `devsplit.yaml` para `~/.config/dev.devsplit.app/`**. Esse seed e essencial: aberto pelo
+launcher o cwd e o `$HOME` (nao o repo), entao sem a config ali o app nao acha o stage e o botao
+**ligar nao faz nada**. Desinstala com `./packaging/install-local.sh --uninstall`.
+
+Runtime: **mkcert** (confia a CA no navegador) e **polkit/pkexec** (edita `/etc/hosts` + libera a
+`:443`). Em WM enxutos (niri/sway/hyprland) tenha um **agente polkit** ativo, senao o prompt de senha
+nao aparece.
+
+### Disponibilizar para baixar
+
+Tag `v*` dispara o CI ([`build.yml`](./.github/workflows/build.yml)), que publica um release com
+`.AppImage`/`.deb`/`.dmg`/`.msi`. Local, `cd app && cargo tauri build` gera o `.AppImage` (universal) e
+o `.deb` em `app/src-tauri/target/release/bundle/`. O usuario escolhe pela distro:
+
+| Distro | Instala | No launcher |
+|---|---|---|
+| Debian/Ubuntu/Mint | `sudo apt install ./devsplit_<ver>_amd64.deb` | sim (auto) |
+| Arch/CachyOS/Manjaro | AUR via [`packaging/PKGBUILD`](./packaging/PKGBUILD) — `makepkg -si` (extrai o `.deb` do release) | sim (auto) |
+| Qualquer outra | baixa o `.AppImage` + `./packaging/install-appimage.sh <arquivo>` | sim (registra) |
+
+Todas exigem **mkcert** + **polkit** no runtime (ja declarados como deps no PKGBUILD).
+
 ## Status por plataforma
 
 | Plataforma | Estado |
@@ -201,4 +233,8 @@ devsplit/
 
 ## Licença
 
-MIT OR Apache-2.0.
+Licenciado sob **MIT** ([`LICENSE-MIT`](./LICENSE-MIT)) ou **Apache-2.0**
+([`LICENSE-APACHE`](./LICENSE-APACHE)), à sua escolha.
+
+Salvo indicação em contrário, qualquer contribuição enviada por você para inclusão neste
+projeto, conforme a Apache-2.0, será dual-licenciada como acima, sem termos adicionais.

@@ -88,10 +88,17 @@ export default function App() {
 
   const toggleProxy = useCallback(async () => {
     if (!status) return;
-    if (status.running) await ipc.stopProxy();
-    else await ipc.startProxy();
+    try {
+      if (status.running) await ipc.stopProxy();
+      else await ipc.startProxy();
+    } catch {
+      // o backend ja emite proxy://notice (toast) na falha; aqui so evitamos a
+      // promise rejeitada solta que deixava o clique "sem reacao".
+    }
     setStatus(await ipc.getStatus());
-  }, [status]);
+    // split liga/desliga a CA no navegador -> reflete na aba Certificado.
+    await refreshDoctor();
+  }, [status, refreshDoctor]);
 
   const selectProfile = useCallback(async (name: string) => {
     await ipc.setProfile(name);

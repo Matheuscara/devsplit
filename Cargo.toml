@@ -12,4 +12,4 @@ members = ["crates/devsplit-core"]
 [workspace.package]
 edition = "2021"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/devsplit/devsplit"
+repository = "https://github.com/Matheuscara/devsplit"

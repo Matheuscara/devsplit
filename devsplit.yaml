@@ -3,12 +3,12 @@
 version: 1
 
 upstream:
-  host: api.hml.gateway.acme.com
+  host: api.stage.gateway.acme.com
   kind: stage
   passthrough:
-    resolve: api.hml.gateway.acme.com
+    resolve: api.stage.gateway.acme.com
     # address: 192.0.2.10:443    # OU pin de IP fixo (dispensa o DNS direto)
-    sni: api.hml.gateway.acme.com
+    sni: api.stage.gateway.acme.com
     verify: true
 
 tls:

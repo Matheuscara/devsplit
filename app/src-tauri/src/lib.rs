@@ -212,7 +212,7 @@ fn caroot(app: &AppHandle) -> Result<PathBuf, String> {
 /// Resolve o ProxyConfig do core p/ o perfil ativo (sem IP resolvido ainda).
 async fn base_proxy_config(state: &AppState) -> Result<ProxyConfig, String> {
     let cfg = state.cfg.lock().await;
-    let cfg = cfg.as_ref().ok_or("config nao carregada")?;
+    let cfg = cfg.as_ref().ok_or("nenhum devsplit.yaml carregado — copie p/ ~/.config/dev.devsplit.app/devsplit.yaml (ou rode da pasta do repo)")?;
     let profile = state.profile.lock().await.clone();
     config::to_proxy_config(cfg, &profile, None).map_err(e2s)
 }
@@ -439,10 +439,27 @@ fn nss_has_mkcert() -> bool {
 
 #[tauri::command]
 async fn start_proxy(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    let res = start_proxy_run(&app, &state).await;
+    if let Err(e) = &res {
+        let _ = app.emit(
+            "proxy://notice",
+            Notice {
+                level: "error",
+                message: format!("Falha ao ligar o split: {e}"),
+            },
+        );
+    }
+    res
+}
+
+/// Liga o proxy de fato. Separado do comando p/ o wrapper emitir um toast de erro
+/// em QUALQUER falha (config ausente, bind, elevacao) — senao a falha vira uma
+/// promise solta na UI e o usuario ve "nada acontece".
+async fn start_proxy_run(app: &AppHandle, state: &AppState) -> Result<(), String> {
     if *state.running.lock().await {
         return Ok(());
     }
-    let pcfg = build_runtime_config(&app, &state).await?;
+    let pcfg = build_runtime_config(app, state).await?;
 
     // Todos os FQDNs interceptados (primario + extras) -> cert SAN + /etc/hosts.
     let all_hosts: Vec<String> = std::iter::once(pcfg.intercept_host.clone())
@@ -450,10 +467,23 @@ async fn start_proxy(app: AppHandle, state: State<'_, AppState>) -> Result<(), S
         .collect();
 
     // CA + leaf locais + ServerConfig (sem privilegio).
-    let caroot = caroot(&app)?;
+    let caroot = caroot(app)?;
     let ca = tlsca::ensure_ca(&caroot).map_err(e2s)?;
     let leaf = tlsca::issue_leaf(&ca, &all_hosts, LEAF_MAX_DAYS).map_err(e2s)?;
     let server_config = tlsca::build_server_config(&leaf).map_err(e2s)?;
+
+    // Confia a CA no navegador (NSS) — acoplado ao split. Best-effort: se falhar
+    // (ex.: mkcert ausente), o proxy ainda serve; o browser so avisa cert invalido
+    // ate instalar pela aba Certificado.
+    if let Err(e) = ensure_ca_installed(app).await {
+        let _ = app.emit(
+            "proxy://notice",
+            Notice {
+                level: "warn",
+                message: format!("CA nao confiada no navegador: {e}"),
+            },
+        );
+    }
 
     // Bootstrap privilegiado (UM prompt): /etc/hosts (todos os hosts) + libera :443.
     bootstrap_privileges(state.privileged.clone(), &all_hosts).await?;
@@ -546,7 +576,20 @@ async fn start_proxy(app: AppHandle, state: State<'_, AppState>) -> Result<(), S
 
 #[tauri::command]
 async fn stop_proxy(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
-    // Derruba o servidor e ESPERA liberar a :443 (essencial p/ religar limpo).
+    shutdown_runtime(&app, &state).await;
+    if let Ok(pcfg) = base_proxy_config(&state).await {
+        let _ = app.emit("proxy://status", status_dto(&pcfg, false));
+    }
+    Ok(())
+}
+
+/// Teardown completo do runtime, reusado pelo botao "Desligar" E pelo fechar do
+/// app (`RunEvent::ExitRequested`): derruba o servidor e espera liberar a :443,
+/// aborta a re-resolucao, reverte o /etc/hosts (remove o bloco + entradas soltas
+/// do FQDN -> stage volta a ser alcancavel) e RETIRA a CA do trust store do
+/// navegador. Acoplado ao split: nada fica ativo depois de desligar/fechar.
+/// Hosts e CA sao best-effort — falha de um nao impede o outro.
+async fn shutdown_runtime(app: &AppHandle, state: &AppState) {
     if let Some(h) = state.handle.lock().await.take() {
         h.shutdown().await;
     }
@@ -557,19 +600,13 @@ async fn stop_proxy(app: AppHandle, state: State<'_, AppState>) -> Result<(), St
     }
     *state.resolved_ip.lock().await = None;
 
-    // reverte o /etc/hosts: remove o bloco E as entradas soltas dos FQDNs, p/ o
-    // stage voltar a ser alcancavel (senao "trava apontando local").
-    if let Ok(pcfg) = base_proxy_config(&state).await {
+    if let Ok(pcfg) = base_proxy_config(state).await {
         let hosts: Vec<String> = std::iter::once(pcfg.intercept_host.clone())
             .chain(pcfg.extra_hosts.iter().map(|h| h.host.clone()))
             .collect();
         let _ = revert_hosts(state.privileged.clone(), &hosts).await;
     }
-
-    if let Ok(pcfg) = base_proxy_config(&state).await {
-        let _ = app.emit("proxy://status", status_dto(&pcfg, false));
-    }
-    Ok(())
+    let _ = uninstall_ca(app).await;
 }
 
 /// Remove um bloco ORFAO do /etc/hosts (sessao anterior fechada sem desligar),
@@ -1104,12 +1141,11 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     builder.build(app)?;
     Ok(())
 }
-/// Instala a CA local nos trust stores dos NAVEGADORES (NSS: Firefox/Chrome) via
+/// Confia a CA local nos trust stores dos NAVEGADORES (NSS: Firefox/Chrome) via
 /// mkcert, rodando como o USUARIO (sem root). `TRUST_STORES=nss` evita o sudo
-/// interno do mkcert e cobre exatamente o que o browser valida.
-#[tauri::command]
-async fn install_cert(app: AppHandle) -> Result<String, String> {
-    let caroot = caroot(&app)?;
+/// interno do mkcert e cobre exatamente o que o browser valida. Idempotente.
+async fn ensure_ca_installed(app: &AppHandle) -> Result<String, String> {
+    let caroot = caroot(app)?;
     tlsca::ensure_ca(&caroot).map_err(e2s)?;
     let mkcert = which("mkcert").ok_or("binario 'mkcert' nao encontrado — instale o mkcert")?;
     let out = tokio::task::spawn_blocking(move || {
@@ -1127,6 +1163,41 @@ async fn install_cert(app: AppHandle) -> Result<String, String> {
     } else {
         Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
     }
+}
+
+/// Retira a CA local dos trust stores do navegador (NSS) via `mkcert -uninstall`.
+/// NAO apaga os arquivos da CA (rootCA.pem/-key.pem) — so remove a CONFIANCA, p/
+/// que religar reuse a MESMA CA (leafs ja emitidos seguem validos). Best-effort:
+/// no-op silencioso se a CA nem existe ou o mkcert nao esta instalado.
+async fn uninstall_ca(app: &AppHandle) -> Result<(), String> {
+    let caroot = caroot(app)?;
+    if !caroot.join("rootCA.pem").exists() {
+        return Ok(());
+    }
+    let Some(mkcert) = which("mkcert") else {
+        return Ok(());
+    };
+    let out = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(&mkcert)
+            .env("CAROOT", &caroot)
+            .env("TRUST_STORES", "nss")
+            .arg("-uninstall")
+            .output()
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
+/// Botao manual "Instalar certificado" — confia a CA agora (alem do auto no ligar).
+#[tauri::command]
+async fn install_cert(app: AppHandle) -> Result<String, String> {
+    ensure_ca_installed(&app).await
 }
 
 /// Re-resolve o IP real do stage via DNS direto e aplica a quente (botao da UI).
@@ -1149,7 +1220,7 @@ async fn reresolve_upstream(state: State<'_, AppState>) -> Result<StatusDto, Str
 }
 
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             if let Some(w) = app.get_webview_window("main") {
                 let _ = w.show();
@@ -1214,6 +1285,26 @@ pub fn run() {
             detect_local_services,
             cleanup_hosts
         ])
-        .run(tauri::generate_context!())
+        .build(tauri::generate_context!())
         .expect("erro ao iniciar o devsplit");
+
+    // Teardown ao fechar (janela X ou tray "Sair"): nada pode ficar ativo depois
+    // (reverte /etc/hosts + retira a CA do navegador). prevent_exit segura a saida
+    // p/ o teardown async rodar; depois exit(0) real. A guarda evita loop infinito
+    // (o exit(0) re-dispara ExitRequested).
+    let cleaning = std::sync::atomic::AtomicBool::new(false);
+    app.run(move |app_handle, event| {
+        if let tauri::RunEvent::ExitRequested { api, .. } = event {
+            if cleaning.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                return;
+            }
+            api.prevent_exit();
+            let app_handle = app_handle.clone();
+            tauri::async_runtime::spawn(async move {
+                let state = app_handle.state::<AppState>();
+                shutdown_runtime(&app_handle, &state).await;
+                app_handle.exit(0);
+            });
+        }
+    });
 }

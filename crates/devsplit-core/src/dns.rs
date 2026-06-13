@@ -4,24 +4,30 @@
 use std::net::IpAddr;
 
 use anyhow::{anyhow, Result};
-use hickory_resolver::config::{NameServerConfigGroup, ResolverConfig, ResolverOpts};
-use hickory_resolver::TokioAsyncResolver;
+use hickory_resolver::config::{ResolveHosts, ResolverConfig, ResolverOpts, CLOUDFLARE, GOOGLE};
+use hickory_resolver::net::runtime::TokioRuntimeProvider;
+use hickory_resolver::Resolver;
 
 /// Resolve `fqdn` via DNS DIRETO (Cloudflare 1.1.1.1 + Google 8.8.8.8),
 /// IGNORANDO o arquivo hosts (anti-loop). Retorna o primeiro IPv4 encontrado;
 /// se nao houver nenhum, o primeiro IPv6.
 pub async fn resolve_direct(fqdn: &str) -> Result<IpAddr> {
     // Cloudflare + Google como resolvers diretos (UDP/TCP :53).
-    let mut servers = NameServerConfigGroup::cloudflare();
-    servers.merge(NameServerConfigGroup::google());
-    let config = ResolverConfig::from_parts(None, vec![], servers);
+    let name_servers = CLOUDFLARE
+        .udp_and_tcp()
+        .chain(GOOGLE.udp_and_tcp())
+        .collect();
+    let config = ResolverConfig::from_parts(None, vec![], name_servers);
 
     // Anti-loop: NUNCA consultar o arquivo hosts (onde o devsplit aponta o FQDN
     // p/ 127.0.0.1). Precisamos do IP REAL do gateway remoto.
     let mut opts = ResolverOpts::default();
-    opts.use_hosts_file = false;
+    opts.use_hosts_file = ResolveHosts::Never;
 
-    let resolver = TokioAsyncResolver::tokio(config, opts);
+    let resolver = Resolver::builder_with_config(config, TokioRuntimeProvider::default())
+        .with_options(opts)
+        .build()
+        .map_err(|e| anyhow!("falha ao construir resolver DNS: {e}"))?;
     let lookup = resolver
         .lookup_ip(fqdn)
         .await

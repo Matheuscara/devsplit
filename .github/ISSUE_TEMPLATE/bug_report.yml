@@ -1,0 +1,50 @@
+name: "🐞 Bug"
+description: Reportar um comportamento incorreto do devsplit
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Obrigado por reportar! **Não** inclua hostnames, IPs ou tokens reais —
+        use placeholders (`api.stage.example.com`, `192.0.2.10`). Para
+        vulnerabilidades de segurança, use o canal privado descrito em `SECURITY.md`.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: O que aconteceu
+      description: Descreva o bug e o que você esperava que acontecesse.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Passos para reproduzir
+      placeholder: |
+        1. Config (devsplit.yaml relevante, sanitizado)
+        2. Ação na UI / comando
+        3. Resultado observado
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Sistema operacional
+      options:
+        - Linux
+        - macOS
+        - Windows
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Versão do devsplit
+      placeholder: "ex.: v0.1.0 ou commit sha"
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / saída relevante
+      description: Cole logs do app ou do terminal (sem segredos).
+      render: shell

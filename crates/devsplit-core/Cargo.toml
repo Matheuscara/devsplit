@@ -27,7 +27,7 @@ webpki-roots = "0.26"
 rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }
 
 # DNS direto (ignora /etc/hosts)
-hickory-resolver = "0.24"
+hickory-resolver = "0.26"
 
 # estado do proxy lock-free p/ hot-reload
 arc-swap = "1"

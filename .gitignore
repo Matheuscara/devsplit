@@ -19,6 +19,9 @@ app/src-tauri/gen/
 .DS_Store
 Thumbs.db
 
+# ── Ferramentas de scan de seguranca (binarios/bundles/DBs locais, ~GBs) ──
+.sectools/
+
 # NOTA: Cargo.lock e package-lock.json SAO versionados (apps/binarios),
 # e app/src-tauri/icons/ TAMBEM (necessarios p/ o build). devsplit.yaml na
 # raiz e a config de time (commitavel); ver examples/devsplit.yaml.

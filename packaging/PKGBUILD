@@ -1,0 +1,36 @@
+# Maintainer: Matheus Cara <seu-email@exemplo.com>
+#
+# devsplit — pacote BINARIO p/ Arch/CachyOS/Manjaro (AUR).
+# Baixa o .deb publicado no GitHub Release e extrai (binario + .desktop + icones).
+# Instala system-wide -> aparece no launcher (Super+Espaco) automaticamente.
+#
+# Publicar no AUR:
+#   1) faca o release no GitHub com o artefato devsplit_<ver>_amd64.deb
+#   2) atualize pkgver + o sha256sums (use `makepkg -g` ou `updpkgsums`)
+#   3) makepkg --printsrcinfo > .SRCINFO  &&  git push  (no repo aur.git)
+# Instalar local a partir deste arquivo:  makepkg -si
+
+pkgname=devsplit
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Split de trafego local de dev por path-prefix: intercepta :443 e divide por prefixo (local vs stage)"
+arch=('x86_64')
+url="https://github.com/Matheuscara/devsplit"
+license=('MIT')
+# webkit2gtk-4.1/gtk3: webview do Tauri. mkcert: confia a CA no navegador.
+# polkit: pkexec p/ editar /etc/hosts e liberar o bind na :443.
+depends=('webkit2gtk-4.1' 'gtk3' 'libayatana-appindicator' 'mkcert' 'polkit')
+optdepends=('nss: confiar a CA no Chrome/Chromium (certutil)')
+provides=('devsplit')
+conflicts=('devsplit-git')
+options=('!strip' '!debug')
+source=("${pkgname}_${pkgver}.deb::${url}/releases/download/v${pkgver}/${pkgname}_${pkgver}_amd64.deb")
+# substitua por `updpkgsums` apos publicar o release:
+sha256sums=('SKIP')
+
+package() {
+  cd "$srcdir"
+  # .deb = arquivo ar com control.tar.* + data.tar.*; bsdtar le os dois passos.
+  bsdtar -xf "${pkgname}_${pkgver}.deb"
+  bsdtar -xf data.tar.* -C "$pkgdir/"
+}
