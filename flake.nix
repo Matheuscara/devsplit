@@ -36,8 +36,8 @@
 
         appimage = pkgs.fetchurl {
           url = "https://github.com/Matheuscara/devsplit/releases/download/v${version}/devsplit_${version}_amd64.AppImage";
-          # deixe lib.fakeHash e rode `nix build` p/ descobrir o hash real:
-          sha256 = lib.fakeHash;
+          # hash do AppImage publicado (v0.1.0). No bump de versao: troque por lib.fakeHash, rode `nix build` e cole o "got: sha256-...".
+          sha256 = "sha256-TXvxGslntmbJQMq7d4Xht/tBY4sIuJIS1vQKK2Tqdfo=";
         };
 
         devsplit = pkgs.appimageTools.wrapType2 {
