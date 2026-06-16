@@ -156,34 +156,67 @@ Copie [`examples/devsplit.yaml`](./examples/devsplit.yaml) para a raiz do seu re
 
 ## Instalar
 
-### No seu PC (Linux, sem root)
+### Para o time (qualquer Linux) — 1 comando
 
 ```bash
-./packaging/install-local.sh        # build (--no-bundle) + binario, icones, .desktop e config
+curl -fsSL https://raw.githubusercontent.com/Matheuscara/devsplit/main/packaging/install.sh | bash
 ```
 
-Poe o binario em `~/.local/bin`, registra o `.desktop` (aparece no launcher — **Super+Espaco**) e
-**copia o `devsplit.yaml` para `~/.config/dev.devsplit.app/`**. Esse seed e essencial: aberto pelo
-launcher o cwd e o `$HOME` (nao o repo), entao sem a config ali o app nao acha o stage e o botao
-**ligar nao faz nada**. Desinstala com `./packaging/install-local.sh --uninstall`.
+Detecta a distro e baixa o artefato certo do **último release**: `.deb` (Debian/Ubuntu/Mint via `apt`),
+`.rpm` (Fedora/RHEL via `dnf`, openSUSE via `zypper`) ou `.AppImage` (qualquer outra, registrada no
+launcher sem root). Já garante o **mkcert** (gerenciador da distro; sem `sudo` → baixa o binário oficial
+p/ `~/.local/bin`), checa o **polkit/pkexec** e semeia o `~/.config/dev.devsplit.app/devsplit.yaml` —
+crucial: sem ele o app não acha o stage e o botão **ligar não faz nada**. Desinstala com
+`curl -fsSL …/install.sh | bash -s -- --uninstall`.
 
-Runtime: **mkcert** (confia a CA no navegador) e **polkit/pkexec** (edita `/etc/hosts` + libera a
-`:443`). Em WM enxutos (niri/sway/hyprland) tenha um **agente polkit** ativo, senao o prompt de senha
-nao aparece.
+> Variáveis: `DEVSPLIT_TAG=v0.1.0` fixa a versão; `DEVSPLIT_FORCE_APPIMAGE=1` força o AppImage.
 
-### Disponibilizar para baixar
+### NixOS
 
-Tag `v*` dispara o CI ([`build.yml`](./.github/workflows/build.yml)), que publica um release com
-`.AppImage`/`.deb`/`.dmg`/`.msi`. Local, `cd app && cargo tauri build` gera o `.AppImage` (universal) e
-o `.deb` em `app/src-tauri/target/release/bundle/`. O usuario escolhe pela distro:
+```bash
+nix profile install github:Matheuscara/devsplit   # ou rodar 1x: nix run github:Matheuscara/devsplit
+```
+
+O [`flake.nix`](./flake.nix) embrulha o `.AppImage` (`appimageTools`) e **injeta mkcert + nssTools** no
+PATH do app. No seu `configuration.nix`: `security.polkit.enable = true` e
+`boot.kernel.sysctl."net.ipv4.ip_unprivileged_port_start" = 443` — no Nix o `setcap` não pega no
+`/nix/store` (read-only), então o app cai no fallback `sysctl` p/ bindar a `:443`.
+
+### Manual, por distro
+
+Baixe o artefato da sua distro na [página de Releases](https://github.com/Matheuscara/devsplit/releases):
 
 | Distro | Instala | No launcher |
 |---|---|---|
 | Debian/Ubuntu/Mint | `sudo apt install ./devsplit_<ver>_amd64.deb` | sim (auto) |
+| Fedora/RHEL/Rocky | `sudo dnf install ./devsplit-<ver>-1.x86_64.rpm` | sim (auto) |
+| openSUSE | `sudo zypper install ./devsplit-<ver>-1.x86_64.rpm` | sim (auto) |
 | Arch/CachyOS/Manjaro | AUR via [`packaging/PKGBUILD`](./packaging/PKGBUILD) — `makepkg -si` (extrai o `.deb` do release) | sim (auto) |
-| Qualquer outra | baixa o `.AppImage` + `./packaging/install-appimage.sh <arquivo>` | sim (registra) |
+| Qualquer outra | `.AppImage` + [`packaging/install-appimage.sh`](./packaging/install-appimage.sh) `<arquivo>` | sim (registra) |
 
-Todas exigem **mkcert** + **polkit** no runtime (ja declarados como deps no PKGBUILD).
+Todas exigem **mkcert** + **polkit/pkexec** no runtime. Em WM enxutos (niri/sway/hyprland) tenha um
+**agente polkit** ativo, senão o prompt de senha não aparece.
+
+### Do código (contribuidores)
+
+```bash
+./packaging/install-local.sh        # build do fonte + binario, icones, .desktop e seed da config (~/.local, sem root)
+```
+
+Compila e instala por-usuário; `--uninstall` remove. Detalhes em
+[`docs/04-build-distribuicao.md`](./docs/04-build-distribuicao.md).
+
+### Publicar um release (mantenedor)
+
+Os instaladores saem do CI: empurre uma tag e o [`build.yml`](./.github/workflows/build.yml) builda nos
+3 SOs e **publica** o release com `.AppImage`/`.deb`/`.rpm`/`.dmg`/`.msi`:
+
+```bash
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+`releaseDraft: false` publica direto (o instalador 1-linha lê `releases/latest`, que ignora drafts). Quer
+revisar antes de expor? Volte p/ `releaseDraft: true` e rode `gh release edit <tag> --draft=false` ao fim.
 
 ## Status por plataforma
 

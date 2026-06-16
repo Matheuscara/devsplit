@@ -66,6 +66,29 @@ mão, ou não bundlar e detectar/baixar no primeiro uso, ou migrar p/ trust 100%
 macOS Developer ID + **notarização**; Windows EV/Azure Trusted Signing; auto-update via
 `tauri-plugin-updater` com chave de assinatura. **Planejado, não exercido neste repo.**
 
+### 1.3 Distribuição na máquina do dev
+
+O CI **publica** o release em tag `v*` (`releaseDraft: false`); o `tauri.conf.json` gera
+`appimage`/`deb`/`rpm` no Linux (mais `dmg`/`nsis`). Três caminhos de instalação, todos
+lendo o **último release**:
+
+- **Instalador 1-linha** (`packaging/install.sh`) — `curl -fsSL …/packaging/install.sh | bash`.
+  Detecta a distro via `/etc/os-release` e instala o artefato nativo: `.deb` (apt), `.rpm`
+  (dnf/zypper) ou `.AppImage` (registrado por-usuário, sem root). Garante o **mkcert**
+  (gerenciador da distro → fallback p/ binário oficial em `~/.local/bin` quando não há sudo),
+  checa **polkit/pkexec** e semeia `~/.config/dev.devsplit.app/devsplit.yaml`. `--uninstall` reverte.
+- **NixOS** (`flake.nix`) — `nix profile install github:Matheuscara/devsplit`. `appimageTools.wrapType2`
+  embrulha o `.AppImage` num FHS-env e injeta **mkcert + nssTools** no PATH (`extraPkgs`).
+  Atenção: o `setcap` **não pega** no `/nix/store` (read-only) — o app usa o fallback
+  `sysctl net.ipv4.ip_unprivileged_port_start=443`; garanta `security.polkit.enable` e o sysctl
+  no `configuration.nix`. A cada release, suba `version` e refaça o `sha256` (deixe `lib.fakeHash`,
+  rode `nix build`, cole o hash que o Nix imprime).
+- **Manual/AUR** — baixar o artefato da página de Releases, ou Arch via `packaging/PKGBUILD`
+  (`makepkg -si`, extrai o `.deb` do release).
+
+> O `mkcert` **não** é declarável como dep do `.deb`/`.rpm` (não é uma lib; ausente nos repos
+> padrão) — por isso o instalador e o flake o provêm fora do pacote.
+
 ---
 
 ## 2. Plugins nativos (em uso)

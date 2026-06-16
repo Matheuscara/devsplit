@@ -2,7 +2,9 @@ name: build
 
 # Valida o nucleo (testes) e BUILDA o app Tauri nos 3 SOs.
 # - push/PR: testa + builda (artefatos anexados ao run) — prova que compila em Linux/macOS/Windows.
-# - tag `v*`: alem disso, cria um RELEASE draft com os instaladores (.AppImage/.deb/.dmg/.msi).
+# - tag `v*`: alem disso, PUBLICA um RELEASE com os instaladores (.AppImage/.deb/.rpm/.dmg/.msi).
+#   releaseDraft=false -> sai publicado direto (o instalador 1-linha le `releases/latest`, que ignora draft).
+#   Quer revisar antes? Troque p/ `releaseDraft: true` e publique manualmente (gh release edit <tag> --draft=false).
 #
 # Pre-req do Tauri: o frontend (app/) builda via beforeBuildCommand (`npm run build`) e o
 # `cargo tauri build` embute o dist/ (o `devUrl` foi removido — sem dev server em runtime).
@@ -69,7 +71,7 @@ jobs:
         run: npm ci
         working-directory: ./app
 
-      - name: Build do app Tauri (+ release draft em tags)
+      - name: Build do app Tauri (+ release publicado em tags)
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -81,7 +83,7 @@ jobs:
           projectPath: ./app
           tagName: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
           releaseName: ${{ startsWith(github.ref, 'refs/tags/v') && format('devsplit {0}', github.ref_name) || '' }}
-          releaseDraft: true
+          releaseDraft: false
           prerelease: false
 
       - name: Anexar instaladores ao run (push/PR, sem tag)
