@@ -11,7 +11,7 @@ use std::path::Path;
 use anyhow::{anyhow, bail, Context, Result};
 use serde::Deserialize;
 
-use crate::types::{HostConfig, PassthroughTarget, ProxyConfig, Route, RouteTable, Upstream};
+use crate::types::{CorsPolicy, HostConfig, PassthroughTarget, ProxyConfig, Route, RouteTable, Upstream};
 
 fn default_true() -> bool {
     true
@@ -102,6 +102,8 @@ pub struct CorsSpec {
     #[serde(default)]
     pub allow_origins: Vec<String>,
     #[serde(default)]
+    pub allow_origins_regex: Vec<String>,
+    #[serde(default)]
     pub allow_credentials: bool,
 }
 
@@ -146,6 +148,9 @@ fn split_host_port(s: &str) -> Result<(String, u16)> {
         .with_context(|| format!("porta invalida em `{s}`"))?;
     // Remove colchetes de IPv6 literal, se houver.
     let host = host.trim_start_matches('[').trim_end_matches(']');
+    if host.is_empty() {
+        bail!("endereco sem host: `{s}`");
+    }
     Ok((host.to_string(), port))
 }
 
@@ -163,6 +168,12 @@ fn parse_target(target: &str) -> Result<(String, u16)> {
 
 /// Monta o [`PassthroughTarget`] a partir de um [`PassthroughSpec`].
 fn build_passthrough(pt: &PassthroughSpec) -> Result<PassthroughTarget> {
+    if !pt.verify {
+        bail!(
+            "passthrough.verify=false não é suportado (sni `{}`) — o devsplit nunca desabilita validação de certificado",
+            pt.sni
+        );
+    }
     let (fixed_ip, port) = match &pt.address {
         Some(addr) => {
             let (ip_s, port) = split_host_port(addr)
@@ -179,7 +190,6 @@ fn build_passthrough(pt: &PassthroughSpec) -> Result<PassthroughTarget> {
         resolve_host: pt.resolve.clone(),
         fixed_ip,
         port,
-        verify: pt.verify,
     })
 }
 
@@ -198,6 +208,18 @@ fn collect_routes<'a>(
         .get(name)
         .ok_or_else(|| anyhow!("perfil `{name}` nao encontrado"))?;
     chain.push(name.to_string());
+
+    let mut seen = std::collections::HashSet::new();
+    for rs in &profile.routes {
+        for p in std::iter::once(&rs.prefix).chain(rs.also.iter()) {
+            if !p.starts_with('/') {
+                bail!("prefixo `{p}` no perfil `{name}` deve comecar com `/`");
+            }
+            if !seen.insert(p.as_str()) {
+                bail!("prefixo `{p}` duplicado no perfil `{name}`");
+            }
+        }
+    }
 
     let mut routes = Vec::new();
     if let Some(parent) = &profile.extends {
@@ -237,25 +259,29 @@ pub fn to_proxy_config(
     let mut chain = Vec::new();
     let route_specs = collect_routes(cfg, profile, &mut chain)?;
 
+    // Rotas do filho (apendadas depois) sobrescrevem as do pai com o mesmo
+    // prefixo; a posicao da primeira ocorrencia e preservada.
     let mut routes: Vec<Route> = Vec::new();
+    let mut index: HashMap<String, usize> = HashMap::new();
     for rs in &route_specs {
         let (thost, tport) = parse_target(&rs.target)
             .with_context(|| format!("target invalido na rota `{}`", rs.prefix))?;
-        let make = || Upstream::Local {
-            host: thost.clone(),
-            port: tport,
-        };
-        routes.push(Route {
-            host: upstream.host.clone(),
-            prefix: rs.prefix.clone(),
-            upstream: make(),
-        });
-        for also in &rs.also {
-            routes.push(Route {
+        for prefix in std::iter::once(&rs.prefix).chain(rs.also.iter()) {
+            let route = Route {
                 host: upstream.host.clone(),
-                prefix: also.clone(),
-                upstream: make(),
-            });
+                prefix: prefix.clone(),
+                upstream: Upstream::Local {
+                    host: thost.clone(),
+                    port: tport,
+                },
+            };
+            match index.get(prefix) {
+                Some(&i) => routes[i] = route,
+                None => {
+                    index.insert(prefix.clone(), routes.len());
+                    routes.push(route);
+                }
+            }
         }
     }
 
@@ -287,6 +313,23 @@ pub fn to_proxy_config(
     let (listen_host, listen_port) =
         split_host_port(&listen).with_context(|| format!("defaults.listen invalido: `{listen}`"))?;
 
+    let cors = match &cfg.cors {
+        Some(c) => CorsPolicy {
+            enabled: c.enabled,
+            allow_origins: c.allow_origins.clone(),
+            allow_origins_regex: c
+                .allow_origins_regex
+                .iter()
+                .map(|p| {
+                    regex::Regex::new(p).with_context(|| {
+                        format!("cors.allow_origins_regex invalido (perfil `{profile}`): `{p}`")
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?,
+            allow_credentials: c.allow_credentials,
+        },
+        None => CorsPolicy::default(),
+    };
     Ok(ProxyConfig {
         listen_host,
         listen_port,
@@ -294,6 +337,7 @@ pub fn to_proxy_config(
         routes: RouteTable::new(routes),
         passthrough,
         extra_hosts,
+        cors,
     })
 }
 
@@ -354,7 +398,8 @@ cors: { enabled: true, allow_origins: ["https://app.stage.acme.com"], allow_cred
             Some("203.0.113.40".parse().unwrap())
         );
         assert_eq!(pc.passthrough.port, 443);
-        assert!(pc.passthrough.verify);
+        assert!(pc.cors.enabled);
+        assert!(pc.cors.allows("https://app.stage.acme.com"));
     }
 
     #[test]
@@ -406,5 +451,77 @@ profiles:
         assert_eq!(pc.passthrough.fixed_ip, Some("198.51.100.10".parse().unwrap()));
         // rota mantem host do upstream efetivo
         assert!(pc.routes.entries().iter().all(|r| r.host == "api.prod.acme.com"));
+    }
+
+    const BASE: &str = r#"
+upstream:
+  host: api.example.com
+  passthrough: { resolve: api.example.com, sni: api.example.com }
+"#;
+
+    #[test]
+    fn cors_regex_error_is_clear() {
+        let yaml = format!(
+            "{BASE}profiles:\n  default:\n    routes: []\ncors: {{ enabled: true, allow_origins_regex: [\"^https://(bad$\"] }}\n"
+        );
+        let cfg = parse(&yaml).unwrap();
+        let err = format!("{:#}", to_proxy_config(&cfg, "default", None).unwrap_err());
+        assert!(err.contains("allow_origins_regex") && err.contains("(bad"), "{err}");
+    }
+
+    #[test]
+    fn cors_regex_matches() {
+        let yaml = format!(
+            "{BASE}profiles:\n  default:\n    routes: []\ncors: {{ enabled: true, allow_origins_regex: [\"^https://.*\\\\.acme\\\\.com$\"] }}\n"
+        );
+        let pc = to_proxy_config(&parse(&yaml).unwrap(), "default", None).unwrap();
+        assert!(pc.cors.allows("https://x.acme.com"));
+        assert!(!pc.cors.allows("https://evil.com"));
+    }
+
+    #[test]
+    fn verify_false_rejected() {
+        let yaml = "upstream:\n  host: a.com\n  passthrough: { resolve: a.com, sni: a.com, verify: false }\nprofiles:\n  default:\n    routes: []\n";
+        let err = format!("{:#}", to_proxy_config(&parse(yaml).unwrap(), "default", None).unwrap_err());
+        assert!(err.contains("verify=false"), "{err}");
+    }
+
+    #[test]
+    fn child_overrides_parent_route() {
+        let yaml = format!(
+            "{BASE}profiles:\n  base:\n    routes:\n      - {{ prefix: /auth, target: \"http://127.0.0.1:3001\" }}\n      - {{ prefix: /x, target: \"http://127.0.0.1:3002\" }}\n  child:\n    extends: base\n    routes:\n      - {{ prefix: /auth, target: \"http://127.0.0.1:4001\" }}\n"
+        );
+        let pc = to_proxy_config(&parse(&yaml).unwrap(), "child", None).unwrap();
+        let auth: Vec<_> = pc.routes.entries().iter().filter(|r| r.prefix == "/auth").collect();
+        assert_eq!(auth.len(), 1);
+        assert_eq!(auth[0].upstream, local("127.0.0.1", 4001));
+        assert_eq!(pc.routes.entries().len(), 2);
+    }
+
+    #[test]
+    fn duplicate_prefix_same_profile_rejected() {
+        let yaml = format!(
+            "{BASE}profiles:\n  default:\n    routes:\n      - {{ prefix: /a, target: \"http://127.0.0.1:1\" }}\n      - {{ prefix: /b, target: \"http://127.0.0.1:2\", also: [/a] }}\n"
+        );
+        let err = format!("{:#}", to_proxy_config(&parse(&yaml).unwrap(), "default", None).unwrap_err());
+        assert!(err.contains("duplicado"), "{err}");
+    }
+
+    #[test]
+    fn prefix_must_start_with_slash() {
+        let yaml = format!(
+            "{BASE}profiles:\n  default:\n    routes:\n      - {{ prefix: api, target: \"http://127.0.0.1:1\" }}\n"
+        );
+        assert!(to_proxy_config(&parse(&yaml).unwrap(), "default", None).is_err());
+    }
+
+    #[test]
+    fn split_host_port_validation() {
+        assert!(split_host_port("host:").is_err());
+        assert!(split_host_port(":80").is_err());
+        assert!(split_host_port("[]:80").is_err());
+        assert!(split_host_port("h:99999").is_err());
+        assert!(split_host_port("h:abc").is_err());
+        assert_eq!(split_host_port("[::1]:80").unwrap(), ("::1".to_string(), 80));
     }
 }

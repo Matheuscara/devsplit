@@ -12,6 +12,7 @@ import type { LucideIcon } from "lucide-react";
 import {
   ipc,
   RUNTIME,
+  subscribe,
   type DoctorCheck,
   type Profiles,
   type Route,
@@ -27,7 +28,7 @@ import { ConfigView } from "./views/ConfigView.tsx";
 import { Onboarding } from "./components/Onboarding.tsx";
 import { SessionView } from "./views/SessionView.tsx";
 import { CommandPalette } from "./components/CommandPalette.tsx";
-import { Toaster } from "./components/Toast.tsx";
+import { Toaster, notify } from "./components/Toast.tsx";
 
 export type ViewId = "routes" | "traffic" | "session" | "cert" | "hosts" | "config";
 
@@ -64,15 +65,33 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    let unlisten: (() => void) | undefined;
     (async () => {
-      setStatus(await ipc.getStatus());
-      setProfiles(await ipc.getProfiles());
-      await refreshRoutes();
-      await refreshDoctor();
-      unlisten = await ipc.onStatus(setStatus);
+      try {
+        setStatus(await ipc.getStatus());
+        setProfiles(await ipc.getProfiles());
+        await refreshRoutes();
+        await refreshDoctor();
+      } catch (err) {
+        notify("error", String(err));
+      }
     })();
-    return () => unlisten?.();
+    const unStatus = subscribe(ipc.onStatus(setStatus));
+    // Hot-reload of the config file only emits a notice; resync derived UI.
+    const unNotice = subscribe(
+      ipc.onNotice((n) => {
+        if (!/recarregad/i.test(n.message)) return;
+        Promise.all([
+          ipc.getStatus().then(setStatus),
+          ipc.getProfiles().then(setProfiles),
+          refreshRoutes(),
+          refreshDoctor(),
+        ]).catch((err) => notify("error", String(err)));
+      }),
+    );
+    return () => {
+      unStatus();
+      unNotice();
+    };
   }, [refreshRoutes, refreshDoctor]);
 
   useEffect(() => {
@@ -95,15 +114,28 @@ export default function App() {
       // o backend ja emite proxy://notice (toast) na falha; aqui so evitamos a
       // promise rejeitada solta que deixava o clique "sem reacao".
     }
-    setStatus(await ipc.getStatus());
-    // split liga/desliga a CA no navegador -> reflete na aba Certificado.
-    await refreshDoctor();
+    try {
+      setStatus(await ipc.getStatus());
+      // split liga/desliga a CA no navegador -> reflete na aba Certificado.
+      await refreshDoctor();
+    } catch (err) {
+      notify("error", String(err));
+    }
   }, [status, refreshDoctor]);
 
   const selectProfile = useCallback(async (name: string) => {
-    await ipc.setProfile(name);
-    setProfiles(await ipc.getProfiles());
-    setRoutes(await ipc.listRoutes());
+    try {
+      await ipc.setProfile(name);
+    } catch (err) {
+      notify("error", String(err));
+      return;
+    }
+    try {
+      setProfiles(await ipc.getProfiles());
+      setRoutes(await ipc.listRoutes());
+    } catch (err) {
+      notify("error", String(err));
+    }
   }, []);
 
   return (
@@ -136,6 +168,7 @@ export default function App() {
               <button
                 key={item.id}
                 onClick={() => setView(item.id)}
+                aria-current={active ? "page" : undefined}
                 className={cn(
                   "flex items-center gap-2.5 rounded-md px-2.5 py-1.5 text-sm",
                   "transition-colors duration-150 outline-none",

@@ -35,7 +35,7 @@ export interface Profiles {
   all: string[];
 }
 
-export type Decision = "local" | "passthrough";
+export type Decision = "local" | "passthrough" | "edge";
 
 export interface TrafficEntry {
   id: number;
@@ -43,11 +43,12 @@ export interface TrafficEntry {
   method: string;
   host: string;
   path: string;
+  query?: string | null;
   decision: Decision;
-  status?: number;
-  latencyMs?: number;
-  reqSize?: number;
-  respSize?: number;
+  status?: number | null;
+  latencyMs?: number | null;
+  reqSize?: number | null;
+  respSize?: number | null;
 }
 
 export interface RequestDetail {
@@ -56,17 +57,18 @@ export interface RequestDetail {
   method: string;
   host: string;
   path: string;
+  query?: string | null;
   decision: Decision;
-  status?: number;
-  latencyMs?: number;
+  status?: number | null;
+  latencyMs?: number | null;
   reqHeaders: Array<[string, string]>;
-  reqBody?: string;
+  reqBody?: string | null;
   reqBodyTruncated: boolean;
-  reqSize?: number;
+  reqSize?: number | null;
   respHeaders: Array<[string, string]>;
-  respBody?: string;
+  respBody?: string | null;
   respBodyTruncated: boolean;
-  respSize?: number;
+  respSize?: number | null;
   redacted: boolean;
 }
 
@@ -83,6 +85,24 @@ export interface Notice {
 }
 
 export type Unlisten = () => void;
+
+/** Subscribe from a useEffect without leaking a listener when the effect is
+ * cleaned up before the async registration resolves. Returns the cleanup. */
+export function subscribe(register: Promise<Unlisten>): Unlisten {
+  let cancelled = false;
+  let un: Unlisten | undefined;
+  register.then(
+    (fn) => {
+      if (cancelled) fn();
+      else un = fn;
+    },
+    () => {},
+  );
+  return () => {
+    cancelled = true;
+    un?.();
+  };
+}
 
 export interface DevsplitIpc {
   getStatus(): Promise<Status>;
@@ -417,14 +437,7 @@ function createMockIpc(): DevsplitIpc {
           ok: true,
         },
         { id: "hosts", label: `Entrada hosts → ${MOCK_HOST}`, ok: true },
-        { id: "port", label: "Porta 8443 disponível", ok: true },
         { id: "upstream", label: "Gateway de stage alcançável", ok: true },
-        {
-          id: "autostart",
-          label: "Iniciar com o sistema",
-          ok: false,
-          hint: "Autostart desativado — ative em Config para subir o proxy no login.",
-        },
       ];
     },
     async getProfiles() {

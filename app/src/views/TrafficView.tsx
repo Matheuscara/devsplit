@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Pause,
   Play,
@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import {
   ipc,
+  subscribe,
   type TrafficEntry,
   type RequestDetail,
 } from "../lib/ipc.ts";
@@ -19,8 +20,16 @@ import { Button } from "../components/Button.tsx";
 import { Badge } from "../components/Badge.tsx";
 import { Card, CardHeader } from "../components/Card.tsx";
 import { toCurl, toHar, downloadBlob } from "../lib/export.ts";
+import { notify } from "../components/Toast.tsx";
 
 const MAX_ROWS = 500;
+const FLUSH_MS = 150;
+
+type Row = TrafficEntry & { timeLabel: string };
+
+function fmtMs(ms?: number | null): string {
+  return ms == null ? "—" : `${ms} ms`;
+}
 
 type StatusClass = "all" | "2xx" | "4xx" | "5xx";
 
@@ -39,23 +48,23 @@ const METHOD_TONE: Record<string, string> = {
   DELETE: "text-danger",
 };
 
-function statusTone(status?: number): "ok" | "warn" | "danger" | "neutral" {
-  if (status === undefined) return "neutral";
+function statusTone(status?: number | null): "ok" | "warn" | "danger" | "neutral" {
+  if (status == null) return "neutral";
   if (status < 400) return "ok";
   if (status < 500) return "warn";
   return "danger";
 }
 
-function inStatusClass(filter: StatusClass, status?: number): boolean {
+function inStatusClass(filter: StatusClass, status?: number | null): boolean {
   if (filter === "all") return true;
-  if (status === undefined) return false;
+  if (status == null) return false;
   if (filter === "2xx") return status >= 200 && status < 300;
   if (filter === "4xx") return status >= 400 && status < 500;
   return status >= 500;
 }
 
-function formatSize(bytes?: number): string {
-  if (bytes === undefined) return "—";
+function formatSize(bytes?: number | null): string {
+  if (bytes == null) return "—";
   if (bytes < 1024) return `${bytes} B`;
   return `${(bytes / 1024).toFixed(1)} KB`;
 }
@@ -106,34 +115,43 @@ function Sparkline({ values }: { values: number[] }) {
 
 interface PrefixAgg {
   prefix: string;
-  local: number[];
-  passthrough: number[];
+  count: number;
+  localPct: string;
+  passPct: string;
   recent: number[];
 }
 
 function LatencyPanel({ events }: { events: TrafficEntry[] }) {
   const rows = useMemo<PrefixAgg[]>(() => {
-    const byPrefix = new Map<string, PrefixAgg>();
+    const byPrefix = new Map<
+      string,
+      { local: number[]; passthrough: number[]; recent: number[] }
+    >();
     // events arrive newest-first; build recent[] chronologically.
     for (let i = events.length - 1; i >= 0; i--) {
       const e = events[i];
-      if (e.latencyMs === undefined) continue;
+      if (e.latencyMs == null || e.decision === "edge") continue;
       const seg = e.path.split("/")[1] ?? "";
       const key = seg ? `/${seg}` : "/";
       let bucket = byPrefix.get(key);
       if (!bucket) {
-        bucket = { prefix: key, local: [], passthrough: [], recent: [] };
+        bucket = { local: [], passthrough: [], recent: [] };
         byPrefix.set(key, bucket);
       }
       if (e.decision === "local") bucket.local.push(e.latencyMs);
       else bucket.passthrough.push(e.latencyMs);
       bucket.recent.push(e.latencyMs);
     }
-    const list = [...byPrefix.values()];
-    list.sort(
-      (a, b) =>
-        b.local.length + b.passthrough.length - (a.local.length + a.passthrough.length),
-    );
+    const pct = (v: number[]) =>
+      v.length ? `${percentile(v, 50)} / ${percentile(v, 95)} ms` : "—";
+    const list = [...byPrefix.entries()].map(([prefix, b]) => ({
+      prefix,
+      count: b.local.length + b.passthrough.length,
+      localPct: pct(b.local),
+      passPct: pct(b.passthrough),
+      recent: b.recent.slice(-24),
+    }));
+    list.sort((a, b) => b.count - a.count);
     return list.slice(0, 6);
   }, [events]);
 
@@ -159,22 +177,12 @@ function LatencyPanel({ events }: { events: TrafficEntry[] }) {
           {rows.map((r) => (
             <tr key={r.prefix} className="font-mono">
               <td className="px-4 py-1.5 text-text">{r.prefix}</td>
-              <td className="px-3 py-1.5 text-right text-accent">
-                {r.local.length
-                  ? `${percentile(r.local, 50)} / ${percentile(r.local, 95)} ms`
-                  : "—"}
-              </td>
-              <td className="px-3 py-1.5 text-right text-[#7cb0ff]">
-                {r.passthrough.length
-                  ? `${percentile(r.passthrough, 50)} / ${percentile(r.passthrough, 95)} ms`
-                  : "—"}
-              </td>
-              <td className="px-3 py-1.5 text-right text-muted">
-                {r.local.length + r.passthrough.length}
-              </td>
+              <td className="px-3 py-1.5 text-right text-accent">{r.localPct}</td>
+              <td className="px-3 py-1.5 text-right text-[#7cb0ff]">{r.passPct}</td>
+              <td className="px-3 py-1.5 text-right text-muted">{r.count}</td>
               <td className="px-4 py-1.5">
                 <div className="flex justify-end">
-                  <Sparkline values={r.recent.slice(-24)} />
+                  <Sparkline values={r.recent} />
                 </div>
               </td>
             </tr>
@@ -204,14 +212,17 @@ function HeaderTable({ headers }: { headers: Array<[string, string]> }) {
 
 function DetailDrawer({
   detail,
+  error,
   onClose,
 }: {
   detail: RequestDetail | null;
+  error: string | null;
   onClose: () => void;
 }) {
   const [tab, setTab] = useState<"request" | "response">("request");
   const [raw, setRaw] = useState(false);
   const [copied, setCopied] = useState(false);
+  const panelRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     setTab("request");
@@ -219,20 +230,37 @@ function DetailDrawer({
     setCopied(false);
   }, [detail?.id]);
 
+  useEffect(() => {
+    panelRef.current?.focus();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
   const copyCurl = async () => {
     if (!detail) return;
-    await navigator.clipboard.writeText(toCurl(detail));
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
+    try {
+      await navigator.clipboard.writeText(toCurl(detail));
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch (err) {
+      notify("error", `Falha ao copiar: ${String(err)}`);
+    }
   };
 
-  const exportHar = () => {
+  const exportHar = async () => {
     if (!detail) return;
-    downloadBlob(
-      `devsplit-${detail.id}.har`,
-      JSON.stringify(toHar(detail), null, 2),
-      "application/json",
-    );
+    try {
+      await downloadBlob(
+        `devsplit-${detail.id}.har`,
+        JSON.stringify(toHar(detail), null, 2),
+        "application/json",
+      );
+    } catch (err) {
+      notify("error", `Falha ao exportar HAR: ${String(err)}`);
+    }
   };
 
   const body = detail
@@ -253,10 +281,22 @@ function DetailDrawer({
       onMouseDown={onClose}
     >
       <div
-        className="flex h-full w-full max-w-xl flex-col border-l border-border bg-surface"
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Detalhe da requisição"
+        tabIndex={-1}
+        className="flex h-full w-full max-w-xl flex-col border-l border-border bg-surface outline-none"
         onMouseDown={(e) => e.stopPropagation()}
       >
-        {detail === null ? (
+        {error !== null ? (
+          <div className="flex flex-1 flex-col items-center justify-center gap-3 text-sm text-muted">
+            <p>Detalhe expirou do buffer</p>
+            <Button size="sm" variant="default" onClick={onClose}>
+              Fechar
+            </Button>
+          </div>
+        ) : detail === null ? (
           <div className="flex flex-1 items-center justify-center text-sm text-muted">
             Carregando detalhe…
           </div>
@@ -275,7 +315,7 @@ function DetailDrawer({
                   </span>
                   <Badge
                     tone={
-                      detail.decision === "local" ? "local" : "passthrough"
+                      detail.decision === "edge" ? "neutral" : detail.decision
                     }
                   >
                     {detail.decision}
@@ -287,6 +327,7 @@ function DetailDrawer({
                 <p className="mt-1 break-all font-mono text-sm text-text">
                   {detail.host}
                   {detail.path}
+                  {detail.query ? `?${detail.query}` : ""}
                 </p>
               </div>
               <button
@@ -308,9 +349,7 @@ function DetailDrawer({
               <div className="bg-surface px-4 py-2">
                 <p className="text-muted">Latência</p>
                 <p className="font-mono text-text">
-                  {detail.latencyMs !== undefined
-                    ? `${detail.latencyMs} ms`
-                    : "—"}
+                  {fmtMs(detail.latencyMs)}
                 </p>
               </div>
               <div className="bg-surface px-4 py-2">
@@ -389,44 +428,62 @@ function DetailDrawer({
 }
 
 export function TrafficView() {
-  const [events, setEvents] = useState<TrafficEntry[]>([]);
+  const [events, setEvents] = useState<Row[]>([]);
   const [paused, setPaused] = useState(false);
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<StatusClass>("all");
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [detail, setDetail] = useState<RequestDetail | null>(null);
+  const [detailError, setDetailError] = useState<string | null>(null);
   const pausedRef = useRef(paused);
   pausedRef.current = paused;
+  const pendingRef = useRef<Row[]>([]);
 
   useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    (async () => {
-      unlisten = await ipc.onTraffic((e) => {
+    const un = subscribe(
+      ipc.onTraffic((e) => {
         if (pausedRef.current) return;
-        setEvents((prev) => {
-          const next = [e, ...prev];
-          return next.length > MAX_ROWS ? next.slice(0, MAX_ROWS) : next;
+        pendingRef.current.push({
+          ...e,
+          timeLabel: new Date(e.ts).toLocaleTimeString("pt-BR", { hour12: false }),
         });
+      }),
+    );
+    const timer = setInterval(() => {
+      const batch = pendingRef.current;
+      if (batch.length === 0) return;
+      pendingRef.current = [];
+      batch.reverse();
+      setEvents((prev) => {
+        const next = batch.concat(prev);
+        return next.length > MAX_ROWS ? next.slice(0, MAX_ROWS) : next;
       });
-    })();
-    return () => unlisten?.();
+    }, FLUSH_MS);
+    return () => {
+      un();
+      clearInterval(timer);
+    };
   }, []);
 
   useEffect(() => {
-    if (selectedId === null) {
-      setDetail(null);
-      return;
-    }
-    let active = true;
     setDetail(null);
-    (async () => {
-      const d = await ipc.getRequestDetail(selectedId);
-      if (active) setDetail(d);
-    })();
+    setDetailError(null);
+    if (selectedId === null) return;
+    let active = true;
+    ipc.getRequestDetail(selectedId).then(
+      (d) => {
+        if (active) setDetail(d);
+      },
+      (err) => {
+        if (active) setDetailError(String(err));
+      },
+    );
     return () => {
       active = false;
     };
   }, [selectedId]);
+
+  const closeDetail = useCallback(() => setSelectedId(null), []);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -453,7 +510,14 @@ export function TrafficView() {
               {paused ? <Play size={14} /> : <Pause size={14} />}
               {paused ? "Retomar" : "Pausar"}
             </Button>
-            <Button size="sm" variant="ghost" onClick={() => setEvents([])}>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => {
+                pendingRef.current = [];
+                setEvents([]);
+              }}
+            >
               <Trash2 size={14} />
               Limpar
             </Button>
@@ -518,14 +582,21 @@ export function TrafficView() {
             {filtered.map((e) => (
               <tr
                 key={e.id}
+                tabIndex={0}
                 onClick={() => setSelectedId(e.id)}
+                onKeyDown={(ev) => {
+                  if (ev.key === "Enter" || ev.key === " ") {
+                    ev.preventDefault();
+                    setSelectedId(e.id);
+                  }
+                }}
                 className={cn(
-                  "cursor-pointer font-mono transition-colors hover:bg-surface-2/40",
+                  "cursor-pointer font-mono transition-colors hover:bg-surface-2/40 focus:bg-surface-2/40 focus:outline-none",
                   selectedId === e.id && "bg-surface-2/60",
                 )}
               >
                 <td className="whitespace-nowrap px-6 py-1.5 text-xs text-muted">
-                  {new Date(e.ts).toLocaleTimeString("pt-BR", { hour12: false })}
+                  {e.timeLabel}
                 </td>
                 <td
                   className={cn(
@@ -538,15 +609,18 @@ export function TrafficView() {
                 <td className="px-3 py-1.5 text-xs text-muted">{e.host}</td>
                 <td className="max-w-0 truncate px-3 py-1.5 text-text">
                   {e.path}
+                  {e.query ? `?${e.query}` : ""}
                 </td>
                 <td className="px-3 py-1.5">
-                  <Badge tone={e.decision}>{e.decision}</Badge>
+                  <Badge tone={e.decision === "edge" ? "neutral" : e.decision}>
+                    {e.decision}
+                  </Badge>
                 </td>
                 <td className="px-3 py-1.5 text-right">
                   <Badge tone={statusTone(e.status)}>{e.status ?? "—"}</Badge>
                 </td>
                 <td className="px-3 py-1.5 text-right text-xs text-muted">
-                  {e.latencyMs !== undefined ? `${e.latencyMs} ms` : "—"}
+                  {fmtMs(e.latencyMs)}
                 </td>
                 <td className="px-6 py-1.5 text-right text-xs text-muted">
                   {formatSize(e.respSize)}
@@ -567,7 +641,7 @@ export function TrafficView() {
       </div>
 
       {selectedId !== null ? (
-        <DetailDrawer detail={detail} onClose={() => setSelectedId(null)} />
+        <DetailDrawer detail={detail} error={detailError} onClose={closeDetail} />
       ) : null}
     </div>
   );

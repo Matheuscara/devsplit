@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Info, AlertTriangle, XCircle, X } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import { ipc, type NoticeLevel } from "../lib/ipc.ts";
+import { ipc, subscribe, type Notice, type NoticeLevel } from "../lib/ipc.ts";
 import { cn } from "../lib/cn.ts";
 
 interface ToastItem {
@@ -24,23 +24,32 @@ const LEVEL_ICON: Record<NoticeLevel, LucideIcon> = {
 
 const TOAST_TTL_MS = 5000;
 
+const localListeners = new Set<(n: Notice) => void>();
+
+/** Raise a toast from the frontend (e.g. a failed IPC call). */
+export function notify(level: NoticeLevel, message: string): void {
+  for (const cb of localListeners) cb({ level, message });
+}
+
 export function Toaster() {
   const [toasts, setToasts] = useState<ToastItem[]>([]);
 
   useEffect(() => {
-    let unlisten: (() => void) | undefined;
     let seq = 0;
-    (async () => {
-      unlisten = await ipc.onNotice((n) => {
-        const id = ++seq;
-        setToasts((prev) => [...prev, { id, ...n }].slice(-5));
-        setTimeout(
-          () => setToasts((prev) => prev.filter((t) => t.id !== id)),
-          TOAST_TTL_MS,
-        );
-      });
-    })();
-    return () => unlisten?.();
+    const push = (n: Notice) => {
+      const id = ++seq;
+      setToasts((prev) => [...prev, { id, ...n }].slice(-5));
+      setTimeout(
+        () => setToasts((prev) => prev.filter((t) => t.id !== id)),
+        TOAST_TTL_MS,
+      );
+    };
+    localListeners.add(push);
+    const un = subscribe(ipc.onNotice(push));
+    return () => {
+      localListeners.delete(push);
+      un();
+    };
   }, []);
 
   return (

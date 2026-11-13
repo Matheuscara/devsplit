@@ -22,6 +22,17 @@ import { Button } from "../components/Button.tsx";
 import { Badge } from "../components/Badge.tsx";
 import { Switch } from "../components/Switch.tsx";
 import { Card, CardHeader } from "../components/Card.tsx";
+import { notify } from "../components/Toast.tsx";
+
+const TARGET_RE = /^(?:https?:\/\/)?([A-Za-z0-9.-]+|\[[0-9A-Fa-f:]+\]):(\d{1,5})\/?$/;
+
+function validateTarget(t: string): string | null {
+  const m = TARGET_RE.exec(t);
+  if (!m) return "Use host:porta (ex.: localhost:3000 ou http://127.0.0.1:3000)";
+  const port = Number(m[2]);
+  if (port < 1 || port > 65535) return "Porta deve estar entre 1 e 65535";
+  return null;
+}
 
 interface RoutesViewProps {
   status: Status | null;
@@ -49,6 +60,8 @@ export function RoutesView({
   const [target, setTarget] = useState("");
   const [detected, setDetected] = useState<LocalService[] | null>(null);
   const [detecting, setDetecting] = useState(false);
+  const [targetError, setTargetError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
 
   const running = status?.running ?? false;
   const warnings = doctor.filter((c) => !c.ok).length;
@@ -56,8 +69,20 @@ export function RoutesView({
   const submitAdd = async () => {
     const p = prefix.trim();
     const t = target.trim();
-    if (!p || !t) return;
-    await ipc.addRoute(p.startsWith("/") ? p : `/${p}`, t);
+    if (!p || !t || saving) return;
+    const invalid = validateTarget(t);
+    setTargetError(invalid);
+    if (invalid) return;
+    setSaving(true);
+    try {
+      await ipc.addRoute(p.startsWith("/") ? p : `/${p}`, t);
+    } catch (err) {
+      // form stays open with the entered values
+      notify("error", String(err));
+      return;
+    } finally {
+      setSaving(false);
+    }
     setPrefix("");
     setTarget("");
     setAdding(false);
@@ -68,6 +93,8 @@ export function RoutesView({
     setDetecting(true);
     try {
       setDetected(await ipc.detectServices());
+    } catch (err) {
+      notify("error", String(err));
     } finally {
       setDetecting(false);
     }
@@ -196,7 +223,11 @@ export function RoutesView({
                     variant="ghost"
                     className="ml-auto"
                     onClick={async () => {
-                      await ipc.cleanupHosts();
+                      try {
+                        await ipc.cleanupHosts();
+                      } catch (err) {
+                        notify("error", String(err));
+                      }
                       onRerunDoctor();
                     }}
                   >
@@ -243,7 +274,8 @@ export function RoutesView({
           />
 
           {adding ? (
-            <div className="flex items-center gap-2 border-b border-border bg-surface-2/50 px-4 py-3">
+            <div className="border-b border-border bg-surface-2/50 px-4 py-3">
+            <div className="flex items-center gap-2">
               <input
                 autoFocus
                 value={prefix}
@@ -254,21 +286,38 @@ export function RoutesView({
               <span className="text-muted">→</span>
               <input
                 value={target}
-                onChange={(e) => setTarget(e.target.value)}
+                onChange={(e) => {
+                  setTarget(e.target.value);
+                  setTargetError(null);
+                }}
                 placeholder="localhost:3000"
+                aria-invalid={targetError !== null}
+                aria-describedby={targetError ? "route-target-error" : undefined}
                 onKeyDown={(e) => e.key === "Enter" && submitAdd()}
-                className="h-8 w-48 rounded-md border border-border bg-bg px-2.5 font-mono text-sm text-text outline-none focus-visible:border-muted/60"
+                className={cn(
+                  "h-8 w-48 rounded-md border bg-bg px-2.5 font-mono text-sm text-text outline-none focus-visible:border-muted/60",
+                  targetError ? "border-danger/60" : "border-border",
+                )}
               />
-              <Button size="sm" variant="primary" onClick={submitAdd}>
+              <Button size="sm" variant="primary" onClick={submitAdd} disabled={saving}>
                 Salvar
               </Button>
               <Button
                 size="sm"
                 variant="ghost"
-                onClick={() => setAdding(false)}
+                onClick={() => {
+                  setAdding(false);
+                  setTargetError(null);
+                }}
               >
                 Cancelar
               </Button>
+            </div>
+            {targetError ? (
+              <p id="route-target-error" className="mt-1.5 text-xs text-danger">
+                {targetError}
+              </p>
+            ) : null}
             </div>
           ) : null}
 
@@ -346,7 +395,11 @@ export function RoutesView({
                         aria-label={`Alternar ${route.prefix}`}
                         disabled={route.kind === "passthrough"}
                         onChange={async (next) => {
-                          await ipc.toggleRoute(route.prefix, next);
+                          try {
+                            await ipc.toggleRoute(route.prefix, next);
+                          } catch (err) {
+                            notify("error", String(err));
+                          }
                           onRoutesChanged();
                         }}
                       />
@@ -359,7 +412,12 @@ export function RoutesView({
                         variant="danger"
                         aria-label={`Remover ${route.prefix}`}
                         onClick={async () => {
-                          await ipc.removeRoute(route.prefix);
+                          try {
+                            await ipc.removeRoute(route.prefix);
+                          } catch (err) {
+                            notify("error", String(err));
+                            return;
+                          }
                           onRoutesChanged();
                         }}
                       >

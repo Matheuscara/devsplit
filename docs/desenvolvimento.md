@@ -32,7 +32,7 @@ devsplit/
 
 ```bash
 # Núcleo (a parte difícil, testada):
-cargo test -p devsplit-core              # 18 testes; + `-- --ignored` p/ o teste de rede
+cargo test -p devsplit-core              # 32 testes; + `-- --ignored` p/ o teste de rede
 
 # Frontend (tipos + bundle):
 cd app && npx tsc -b && npm run build    # `npm run build` já faz `tsc -b && vite build`

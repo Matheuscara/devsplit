@@ -1,11 +1,11 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Permissoes padrao da janela principal do devsplit.",
+  "description": "Permissoes padrao da janela principal do devsplit. Processos (mkcert, pkexec, certutil) sao disparados so pelo Rust — o webview nao tem acesso a shell. fs so grava no caminho que o usuario escolheu no dialogo save() (o plugin dialog adiciona esse caminho ao escopo do fs).",
   "windows": ["main"],
   "permissions": [
     "core:default",
-    "shell:allow-execute",
-    "shell:allow-spawn"
+    "dialog:allow-save",
+    "fs:allow-write-text-file"
   ]
 }

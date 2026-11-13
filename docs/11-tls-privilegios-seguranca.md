@@ -60,11 +60,21 @@ ligar/desligar".
 
 **Segurança do script root** (`build_priv_script`):
 
-- grava o arquivo hosts via **heredoc** (`cat > '/etc/hosts' <<'__DSHOSTS__' …`) — **sem
-  temp file**, logo **sem janela de TOCTOU**;
-- no ligar, `setcap cap_net_bind_service=+ep <exe>` (libera `:443` p/ o binário) +
-  `sysctl -w net.ipv4.ip_unprivileged_port_start=443` (fallback). Ambos com `|| true`;
-- `which()` resolve caminhos **absolutos** porque o pkexec zera o `PATH`.
+- cada hostname (`upstream.host`/`extra_upstreams[].host`/ambientes) é validado contra
+  RFC-1123 **no load do config** — rejeita a config inteira com erro claro se algum fugir
+  do padrão `[A-Za-z0-9.-]`, evitando que um hostname malicioso injete comandos no heredoc
+  root;
+- o delimitador do heredoc é **aleatório por chamada** (não mais `__DSHOSTS__` fixo) como
+  defesa em profundidade;
+- grava num **tempfile no mesmo diretório** do hosts (`/etc/.devsplit-hosts.tmp`) e troca
+  com `mv -f` (**atômico**, sem janela de truncamento); faz backup em
+  `<hosts>.devsplit.bak` na primeira vez se ainda não existir;
+- `setcap cap_net_bind_service=+ep <exe>` (libera `:443` p/ o binário); o fallback
+  `sysctl -w net.ipv4.ip_unprivileged_port_start=443` só roda **se o setcap falhar**
+  (antes rodava sempre, baixando o piso de porta privilegiada da máquina toda
+  incondicionalmente);
+- `which()` (crate `which`, sem `sh -c`) resolve caminhos **absolutos** porque o pkexec
+  zera o `PATH`.
 
 No desligar, `revert_hosts` remove o bloco do devsplit **e** as entradas soltas do FQDN
 para loopback — só eleva se houver o que tirar.
@@ -96,13 +106,15 @@ header** cujo nome contenha `secret` ou `token`.
 
 O catch-all **sempre** valida o cert remoto (`ServerName`=FQDN, roots Mozilla, **sem**
 `dangerous()`); o **pin de IP** evita redirecionamento; e há a recusa de loopback +
-`X-Devsplit-Hop` → `508` (`01` §4). `verify: false` no YAML é tratado como pé-na-jaca:
-nunca em stage real.
+`X-Devsplit-Hop` → `508` (`01` §4). `verify: false` no YAML é **rejeitado no load do
+config** (erro claro) — não é mais um pé-na-jaca documental, o parser recusa a config.
 
 ### 4.3 Chave da CA
 
-`rootCA-key.pem` é por-usuário, no diretório de config do app — **nunca** versionada nem
-logada. (No roadmap, trust 100% Rust remove a dependência do binário mkcert — `00` §8.)
+`rootCA-key.pem` é por-usuário, no diretório de config do app, com **permissão 0600**
+(owner-only no unix) — nem o default do umask nem outros usuários locais conseguem lê-la.
+**Nunca** versionada nem logada. (No roadmap, trust 100% Rust remove a dependência do
+binário mkcert — `00` §8.)
 
 ### 4.4 Anti-prod
 

@@ -80,13 +80,36 @@ pub fn ensure_ca(caroot: &Path) -> Result<Ca> {
     let key_pem = key.serialize_pem();
 
     fs::write(&cert_path, &cert_pem).with_context(|| format!("escrever {cert_path:?}"))?;
-    fs::write(&key_path, &key_pem).with_context(|| format!("escrever {key_path:?}"))?;
+    write_private(&key_path, key_pem.as_bytes())
+        .with_context(|| format!("escrever {key_path:?}"))?;
 
     Ok(Ca {
         cert_pem,
         key_pem,
         dir: caroot.to_path_buf(),
     })
+}
+
+/// Grava a chave privada com permissao 0600 (somente dono) em unix.
+fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        // `mode` so vale na criacao; garante 0600 se o arquivo ja existia.
+        f.set_permissions(fs::Permissions::from_mode(0o600))?;
+        f.write_all(data)
+    }
+    #[cfg(not(unix))]
+    {
+        fs::write(path, data)
+    }
 }
 
 /// Emite um leaf assinado pela CA p/ `fqdns`. SAN inclui: cada FQDN, o wildcard

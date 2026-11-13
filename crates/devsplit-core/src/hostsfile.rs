@@ -183,10 +183,19 @@ fn atomic_write(path: &Path, content: &str) -> Result<()> {
     Ok(())
 }
 
+/// Le o arquivo hosts tolerando bytes nao-UTF-8 (decodificacao lossy), p/
+/// nunca tratar um hosts valido-mas-nao-UTF-8 como vazio e apaga-lo.
+/// Arquivo inexistente/ilegivel -> string vazia.
+pub fn read_hosts_lossy(path: &Path) -> String {
+    fs::read(path)
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
+        .unwrap_or_default()
+}
+
 /// Aplica o bloco do devsplit ao arquivo hosts: cria backup `.devsplit.bak`
 /// (preservando o ORIGINAL na primeira vez) e reescreve atomicamente.
 pub fn apply(path: &Path, entries: &[(IpAddr, String)]) -> Result<()> {
-    let existing = fs::read_to_string(path).unwrap_or_default();
+    let existing = read_hosts_lossy(path);
     let bak = backup_path(path);
     if path.exists() && !bak.exists() {
         fs::copy(path, &bak).with_context(|| format!("criar backup {bak:?}"))?;
@@ -197,7 +206,7 @@ pub fn apply(path: &Path, entries: &[(IpAddr, String)]) -> Result<()> {
 
 /// Remove o bloco do devsplit do arquivo hosts (escrita atomica).
 pub fn remove(path: &Path) -> Result<()> {
-    let existing = fs::read_to_string(path).unwrap_or_default();
+    let existing = read_hosts_lossy(path);
     let new = render_without_block(&existing);
     atomic_write(path, &new)
 }
@@ -212,6 +221,22 @@ mod tests {
             (IpAddr::V4(Ipv4Addr::LOCALHOST), "api.stage.acme.com".to_string()),
             (IpAddr::V4(Ipv4Addr::LOCALHOST), "app.stage.acme.com".to_string()),
         ]
+    }
+
+    #[test]
+    fn non_utf8_hosts_is_preserved() {
+        let dir = std::env::temp_dir().join(format!("devsplit-nonutf8-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("hosts");
+        fs::write(&path, b"127.0.0.1\tlocalhost # caf\xe9\n10.0.0.5\tintranet\n").unwrap();
+        apply(&path, &entries()).unwrap();
+        let after = fs::read_to_string(&path).unwrap();
+        assert!(after.contains("localhost"), "{after}");
+        assert!(after.contains("10.0.0.5\tintranet"), "{after}");
+        assert!(after.contains("api.stage.acme.com"));
+        remove(&path).unwrap();
+        assert!(fs::read_to_string(&path).unwrap().contains("intranet"));
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

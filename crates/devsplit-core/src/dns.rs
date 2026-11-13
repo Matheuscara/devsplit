@@ -8,20 +8,32 @@ use hickory_resolver::config::{ResolveHosts, ResolverConfig, ResolverOpts, CLOUD
 use hickory_resolver::net::runtime::TokioRuntimeProvider;
 use hickory_resolver::Resolver;
 
-/// Resolve `fqdn` via DNS DIRETO (Cloudflare 1.1.1.1 + Google 8.8.8.8),
-/// IGNORANDO o arquivo hosts (anti-loop). Retorna o primeiro IPv4 encontrado;
-/// se nao houver nenhum, o primeiro IPv6.
+/// Resolve `fqdn` IGNORANDO o arquivo hosts (anti-loop: e la que o devsplit
+/// aponta o FQDN p/ 127.0.0.1). Tenta primeiro os nameservers do sistema
+/// (`/etc/resolv.conf` — respeita VPN/DNS corporativo split-horizon); se
+/// falhar, cai p/ Cloudflare 1.1.1.1 + Google 8.8.8.8. Retorna o primeiro
+/// IPv4 encontrado; se nao houver nenhum, o primeiro IPv6.
 pub async fn resolve_direct(fqdn: &str) -> Result<IpAddr> {
-    // Cloudflare + Google como resolvers diretos (UDP/TCP :53).
+    let system_err = match hickory_resolver::system_conf::read_system_conf() {
+        Ok((config, opts)) => match lookup(fqdn, config, opts).await {
+            Ok(ip) => return Ok(ip),
+            Err(e) => e,
+        },
+        Err(e) => anyhow!("ler config DNS do sistema: {e}"),
+    };
+
     let name_servers = CLOUDFLARE
         .udp_and_tcp()
         .chain(GOOGLE.udp_and_tcp())
         .collect();
     let config = ResolverConfig::from_parts(None, vec![], name_servers);
+    lookup(fqdn, config, ResolverOpts::default())
+        .await
+        .map_err(|e| anyhow!("{e} (resolver do sistema tambem falhou: {system_err})"))
+}
 
-    // Anti-loop: NUNCA consultar o arquivo hosts (onde o devsplit aponta o FQDN
-    // p/ 127.0.0.1). Precisamos do IP REAL do gateway remoto.
-    let mut opts = ResolverOpts::default();
+async fn lookup(fqdn: &str, config: ResolverConfig, mut opts: ResolverOpts) -> Result<IpAddr> {
+    // Anti-loop: NUNCA consultar o arquivo hosts.
     opts.use_hosts_file = ResolveHosts::Never;
 
     let resolver = Resolver::builder_with_config(config, TokioRuntimeProvider::default())
@@ -43,7 +55,6 @@ pub async fn resolve_direct(fqdn: &str) -> Result<IpAddr> {
     }
     first_v6.ok_or_else(|| anyhow!("nenhum IP retornado p/ `{fqdn}`"))
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;

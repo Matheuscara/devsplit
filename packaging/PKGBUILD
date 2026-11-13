@@ -25,8 +25,10 @@ provides=('devsplit')
 conflicts=('devsplit-git')
 options=('!strip' '!debug')
 source=("${pkgname}_${pkgver}.deb::${url}/releases/download/v${pkgver}/${pkgname}_${pkgver}_amd64.deb")
-# substitua por `updpkgsums` apos publicar o release:
-sha256sums=('SKIP')
+# sha256 do devsplit_0.1.0_amd64.deb publicado no release v0.1.0 (calculado do
+# asset baixado). A CADA release: atualize pkgver e rode `updpkgsums` (pacman-
+# contrib) — ou `makepkg -g` e cole a saida aqui. Nunca use 'SKIP'.
+sha256sums=('e4b76134964fbfcc2e457351058c584314a713849910510a48cd64162b563e6c')
 
 package() {
   cd "$srcdir"

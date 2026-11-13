@@ -116,10 +116,10 @@ manualmente) — ver `12` §8. O núcleo (`forward_passthrough`) **exige** o IP 
   vai ao **mesmo host** → chega ao passthrough **e** ao serviço local. **É o que faz
   funcionar:** o local recebe o mesmo token, do mesmo ambiente. Por isso **stage, nunca
   prod**.
-- **CORS.** O motor responde o preflight `OPTIONS` na borda e espelha a `Origin` nos
-  headers de resposta (`Access-Control-Allow-Origin` = origin pedida, com
-  `Allow-Credentials: true` e `Vary: Origin`). Detalhe e a divergência com o
-  `allow_origins`/`allow_origins_regex` do YAML em `02` §2.3 e `10` §6.
+- **CORS.** Desligado por padrão. Quando `cors.enabled: true` no YAML, o motor responde o
+  preflight real (`OPTIONS` + `Access-Control-Request-Method`) na borda e só reflete a
+  `Origin` quando ela casa `allow_origins`/`allow_origins_regex`; `Allow-Credentials` só
+  quando `allow_credentials: true` e a origin foi aceita. Schema em `10` §7.
 
 ---
 

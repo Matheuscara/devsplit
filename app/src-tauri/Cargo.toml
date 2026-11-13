@@ -20,9 +20,13 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = ["tray-icon"] }
-tauri-plugin-shell = "2"
 tauri-plugin-single-instance = "2"
 tauri-plugin-autostart = "2"
+# dialog + fs: export HAR (save() do usuario -> writeTextFile no caminho escolhido).
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+# localiza o mkcert no PATH sem shell (cross-platform, inclusive Windows).
+which = "6"
 
 devsplit-core = { path = "../../crates/devsplit-core" }
 

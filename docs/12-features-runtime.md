@@ -13,10 +13,16 @@ Cada requisição vira um `TrafficEvent` no motor (`handle`) e segue por um cana
 (`buffer 1024`, `try_send` não-bloqueante) até a casca, que faz três coisas:
 
 1. emite `proxy://traffic` com um **resumo leve** (`TrafficSummary`: id, ts, método, host,
-   path, decisão, status, latência, tamanhos) — a lista ao vivo da tela Tráfego;
+   path, query, decisão, status, latência, tamanhos) — a lista ao vivo da tela Tráfego;
 2. guarda o **evento completo** num **ring buffer de 500** entradas (`AppState.traffic`)
    para o detalhe;
 3. emite `proxy://notice` em status `502` (§9).
+
+Sob backpressure (muitos requests simultâneos), o `try_send` pode falhar — o motor conta
+essas perdas num contador atômico (`proxy::dropped_events()`) e loga um `warn!`, em vez de
+falhar silenciosamente. A decisão `Decision::Edge` marca respostas que o **próprio
+devsplit** gerou sem tocar upstream (preflight CORS aceito/rejeitado, `508` anti-loop,
+`421` Host desconhecido, `400` sem Host) — essas também aparecem no inspector.
 
 **Detalhe** (`get_request_detail(id)` → `RequestDetail`): headers de request/response
 (pares nome/valor, redatados — `11` §4.1), preview de body e tamanhos, flag `redacted`.

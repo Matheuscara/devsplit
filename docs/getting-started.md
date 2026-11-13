@@ -33,7 +33,7 @@ compila** — mas o núcleo e o frontend-no-navegador rodam mesmo assim.
 ### 2.1 Testes do núcleo (só Rust)
 
 ```bash
-cargo test -p devsplit-core            # 18 testes (inclui e2e TLS local→proxy→backend + redação de headers)
+cargo test -p devsplit-core            # 32 testes (inclui e2e TLS local→proxy→backend + redação de headers)
 cargo test -p devsplit-core -- --ignored   # + teste de rede (DNS direto)
 ```
 

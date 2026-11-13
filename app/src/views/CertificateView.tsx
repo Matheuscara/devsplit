@@ -10,6 +10,7 @@ import { ipc, type DoctorCheck } from "../lib/ipc.ts";
 import { Card, CardHeader } from "../components/Card.tsx";
 import { Badge } from "../components/Badge.tsx";
 import { Button } from "../components/Button.tsx";
+import { notify } from "../components/Toast.tsx";
 
 interface CertificateViewProps {
   doctor: DoctorCheck[];
@@ -47,10 +48,10 @@ export function CertificateView({ doctor, onRecheck }: CertificateViewProps) {
     setReresolving(true);
     setReresolveMsg(null);
     try {
-      const s = await ipc.reresolveUpstream();
-      setReresolveMsg(`IP do stage atualizado — ${s.interceptHost}`);
+      await ipc.reresolveUpstream();
+      setReresolveMsg("IP do stage re-resolvido");
     } catch (e) {
-      setReresolveMsg(e instanceof Error ? e.message : String(e));
+      notify("error", e instanceof Error ? e.message : String(e));
     } finally {
       setReresolving(false);
     }
@@ -102,12 +103,12 @@ export function CertificateView({ doctor, onRecheck }: CertificateViewProps) {
           <CardHeader title="Detalhes" />
           <dl className="divide-y divide-border text-sm">
             {[
-              { k: "Ferramenta", v: "mkcert (bundlado)" },
+              { k: "Ferramenta", v: "mkcert (via PATH)" },
               { k: "Algoritmo", v: "ECDSA P-256" },
-              { k: "Validade", v: "825 dias" },
+              { k: "Validade do certificado emitido", v: "825 dias" },
               {
                 k: "Trust store",
-                v: trusted ? "system + nss" : "pendente",
+                v: trusted ? "nss (Firefox/Chrome)" : "pendente",
               },
             ].map((row) => (
               <div

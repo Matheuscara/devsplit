@@ -8,6 +8,7 @@ import {
 } from "../lib/ipc.ts";
 import type { ViewId } from "../App.tsx";
 import { cn } from "../lib/cn.ts";
+import { notify } from "./Toast.tsx";
 
 interface Command {
   id: string;
@@ -80,13 +81,18 @@ export function CommandPalette({
         id: "cert",
         label: "Instalar certificado raiz",
         hint: "certificado",
-        run: () => ipc.installCert(),
+        run: async () => {
+          notify("info", await ipc.installCert());
+        },
       },
       {
         id: "reresolve",
         label: "Re-resolver IP do upstream",
         hint: "rede",
-        run: () => ipc.reresolveUpstream(),
+        run: async () => {
+          await ipc.reresolveUpstream();
+          notify("info", "IP do stage re-resolvido");
+        },
       },
     ];
     for (const item of nav) {
@@ -158,7 +164,11 @@ export function CommandPalette({
 
   const exec = async (cmd: Command) => {
     onClose();
-    await cmd.run();
+    try {
+      await cmd.run();
+    } catch (err) {
+      notify("error", String(err));
+    }
   };
 
   const onKeyDown = (e: React.KeyboardEvent) => {
@@ -185,6 +195,9 @@ export function CommandPalette({
       onMouseDown={onClose}
     >
       <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="Paleta de comandos"
         className="w-full max-w-lg overflow-hidden rounded-lg border border-border bg-surface shadow-2xl shadow-black/50"
         style={{ animation: "devsplit-card-in 140ms ease-out" }}
         onMouseDown={(e) => e.stopPropagation()}

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { KeyRound, ShieldAlert, Clock } from "lucide-react";
-import { ipc, type TrafficEntry } from "../lib/ipc.ts";
+import { ipc, subscribe, type TrafficEntry } from "../lib/ipc.ts";
 import { decodeJwt, type JwtDecoded } from "../lib/jwt.ts";
 import { cn } from "../lib/cn.ts";
 import { Card, CardHeader } from "../components/Card.tsx";
@@ -37,16 +37,14 @@ export function SessionView() {
 
   // Track newest request id + collect 401/403 from the live stream.
   useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    (async () => {
-      unlisten = await ipc.onTraffic((e) => {
+    return subscribe(
+      ipc.onTraffic((e) => {
         latestIdRef.current = e.id;
         if (e.status === 401 || e.status === 403) {
           setUnauthorized((prev) => [e, ...prev].slice(0, 20));
         }
-      });
-    })();
-    return () => unlisten?.();
+      }),
+    );
   }, []);
 
   // Poll the latest request's detail for a Bearer token and decode it.

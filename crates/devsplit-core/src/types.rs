@@ -58,8 +58,21 @@ impl RouteTable {
     pub fn match_route(&self, host: &str, path: &str) -> Option<&Route> {
         self.entries
             .iter()
-            .find(|r| r.host == host && path.starts_with(r.prefix.as_str()))
+            .find(|r| r.host == host && prefix_matches(&r.prefix, path))
     }
+}
+
+/// `prefix` casa `path` so em fronteira de segmento: `/auth` casa `/auth`,
+/// `/auth/x`, `/auth?q`, mas NAO `/authors`. Prefixo terminado em `/` (ou `/`
+/// puro) casa qualquer continuacao.
+fn prefix_matches(prefix: &str, path: &str) -> bool {
+    if !path.starts_with(prefix) {
+        return false;
+    }
+    if prefix.ends_with('/') {
+        return true;
+    }
+    matches!(path.as_bytes().get(prefix.len()), None | Some(b'/') | Some(b'?'))
 }
 
 /// Alvo do passthrough (catch-all): conecta no IP REAL pinado e valida o cert
@@ -74,8 +87,6 @@ pub struct PassthroughTarget {
     pub fixed_ip: Option<IpAddr>,
     /// Porta do gateway remoto (tipicamente 443).
     pub port: u16,
-    /// Validar o cert remoto. DEVE ser `true` em stage real.
-    pub verify: bool,
 }
 
 /// Snapshot de configuracao runtime que o motor de proxy consome. Trocado
@@ -95,6 +106,30 @@ pub struct ProxyConfig {
     /// Hosts adicionais interceptados ao mesmo tempo (ex.: ws.stage, cdn.stage),
     /// cada um com rotas + passthrough proprios. Vazio = single-host (padrao).
     pub extra_hosts: Vec<HostConfig>,
+    /// Politica de CORS (bloco `cors`). Desligada = headers do upstream intactos.
+    pub cors: CorsPolicy,
+}
+
+/// Politica de CORS aplicada pelo motor (derivada do bloco `cors`).
+/// `enabled = false` (default): o motor nao toca em nenhum header CORS.
+#[derive(Clone, Debug, Default)]
+pub struct CorsPolicy {
+    pub enabled: bool,
+    /// Origins aceitas por igualdade exata (ex.: "https://app.stage.acme.com").
+    pub allow_origins: Vec<String>,
+    /// Origins aceitas por regex (ja compiladas; ancore com `^...$`).
+    pub allow_origins_regex: Vec<regex::Regex>,
+    /// Envia `Access-Control-Allow-Credentials: true` p/ origins aceitas.
+    pub allow_credentials: bool,
+}
+
+impl CorsPolicy {
+    /// `true` se a politica esta ligada e `origin` casa a allowlist.
+    pub fn allows(&self, origin: &str) -> bool {
+        self.enabled
+            && (self.allow_origins.iter().any(|o| o == origin)
+                || self.allow_origins_regex.iter().any(|r| r.is_match(origin)))
+    }
 }
 
 /// Config de um host adicional interceptado (multi-host).
@@ -113,6 +148,9 @@ pub enum Decision {
     Local(String),
     /// Passada adiante p/ o gateway remoto real.
     Passthrough,
+    /// Respondida pelo proprio devsplit, sem upstream (preflight CORS, 508
+    /// anti-loop, 421 host desconhecido, 400 sem Host).
+    Edge,
 }
 
 /// Par header (nome, valor) — ja redatado quando sensivel.
@@ -133,6 +171,8 @@ pub struct TrafficEvent {
     pub method: String,
     pub host: String,
     pub path: String,
+    /// Query string crua (sem o `?`), quando houver.
+    pub query: Option<String>,
     pub decision: Decision,
     /// Status HTTP da resposta, quando conhecido.
     pub status: Option<u16>,

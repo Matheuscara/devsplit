@@ -100,6 +100,32 @@ asset_url() { # $1 = regex de extensao, ex '\.deb'
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 fetch() { say "baixando $(basename "$2")"; curl -fL --progress-bar -o "$1" "$2" || die "download falhou: $2"; }
 
+sha256_of() {
+  if have sha256sum; then sha256sum "$1" | cut -d' ' -f1
+  elif have shasum; then shasum -a 256 "$1" | cut -d' ' -f1
+  else echo ""; fi
+}
+
+# Baixa um artefato do release e confere a integridade:
+#  - se o release publicar "<asset>.sha256", o hash TEM que bater (senao aborta);
+#  - sempre imprime o SHA-256 em destaque p/ o usuario conferir com a pagina
+#    do release (github.com/$REPO/releases).
+fetch_verified() { # $1 = destino, $2 = url do asset
+  fetch "$1" "$2"
+  [ -s "$1" ] || die "download vazio: $2"
+  local got; got="$(sha256_of "$1")"
+  [ -n "$got" ] || die "sem sha256sum/shasum p/ verificar o download."
+  local sum_url; sum_url="$(asset_url "$(basename "$2" | sed 's/[.[\*^$]/\\&/g')\\.sha256")"
+  if [ -n "$sum_url" ]; then
+    local want
+    want="$(curl -fsSL "$sum_url" | grep -oE '[0-9a-fA-F]{64}' | head -1 | tr 'A-F' 'a-f')" \
+      || die "nao consegui baixar o checksum: $sum_url"
+    [ "$got" = "$want" ] || die "SHA-256 NAO confere p/ $(basename "$2") (esperado $want, obtido $got) — download corrompido ou adulterado."
+    say "SHA-256 conferido com $(basename "$sum_url")"
+  fi
+  printf '\n    SHA-256 %s\n    %s\n    (confira com o publicado em github.com/%s/releases)\n\n' "$(basename "$2")" "$got" "$REPO"
+}
+
 # ------------------------------------------------------------- garantir mkcert
 ensure_mkcert() {
   if have mkcert; then say "mkcert ok ($(command -v mkcert))"; return; fi
@@ -120,7 +146,14 @@ ensure_mkcert() {
         | grep -iE "linux-${arch}\$" | head -1)"
   [ -n "$url" ] || { warn "nao achei binario mkcert p/ linux-$arch; instale manualmente"; return; }
   mkdir -p "$PREFIX/bin"
-  fetch "$PREFIX/bin/mkcert" "$url"; chmod +x "$PREFIX/bin/mkcert"
+  local tmp="$WORK/mkcert"
+  fetch "$tmp" "$url"
+  # sanidade: nao-vazio e binario ELF (nao uma pagina HTML de erro/redirect).
+  [ -s "$tmp" ] || die "download de mkcert vazio/corrompido"
+  [ "$(head -c 4 "$tmp" | od -An -tx1 | tr -d ' \n')" = "7f454c46" ] \
+    || die "download de mkcert nao e um binario ELF (corrompido/adulterado?): $url"
+  printf '    SHA-256 mkcert: %s\n' "$(sha256_of "$tmp")"
+  install -m755 "$tmp" "$PREFIX/bin/mkcert"
   say "mkcert -> $PREFIX/bin/mkcert"
   case ":$PATH:" in *":$PREFIX/bin:"*) ;; *) warn "$PREFIX/bin nao esta no PATH — adicione p/ o app achar o mkcert";; esac
 }
@@ -156,7 +189,7 @@ seed_config() {
 install_appimage() {
   local url; url="$(asset_url '\.AppImage')"
   [ -n "$url" ] || die "release sem .AppImage."
-  local f="$WORK/devsplit.AppImage"; fetch "$f" "$url"
+  local f="$WORK/devsplit.AppImage"; fetch_verified "$f" "$url"
   install -Dm755 "$f" "$BIN_APPIMAGE"; say "binario -> $BIN_APPIMAGE"
   # icone: extrai de dentro do AppImage (best-effort)
   if ( cd "$WORK" && APPIMAGE_EXTRACT_AND_RUN=1 "$BIN_APPIMAGE" --appimage-extract >/dev/null 2>&1 ); then
@@ -186,7 +219,7 @@ EOF
 install_deb() {
   local url; url="$(asset_url '\.deb')"
   [ -n "$url" ] || { warn "release sem .deb; usando AppImage"; install_appimage; return; }
-  local f="$WORK/devsplit.deb"; fetch "$f" "$url"
+  local f="$WORK/devsplit.deb"; fetch_verified "$f" "$url"
   say "instalando .deb (apt resolve deps; pode pedir senha do sudo)"
   $SUDO apt-get update -y || true
   $SUDO apt-get install -y "$f" || { $SUDO dpkg -i "$f" || true; $SUDO apt-get -f install -y; }
@@ -194,10 +227,10 @@ install_deb() {
 install_rpm() {
   local url; url="$(asset_url '\.rpm')"
   [ -n "$url" ] || { warn "release sem .rpm; usando AppImage"; install_appimage; return; }
-  local f="$WORK/devsplit.rpm"; fetch "$f" "$url"
+  local f="$WORK/devsplit.rpm"; fetch_verified "$f" "$url"
   say "instalando .rpm (pode pedir senha do sudo)"
   if   have dnf;    then $SUDO dnf install -y "$f"
-  elif have zypper; then $SUDO zypper --non-interactive install --allow-unsigned-rpm "$f"
+  elif have zypper; then $SUDO zypper --non-interactive install "$f"
   else die "nem dnf nem zypper encontrados"; fi
 }
 

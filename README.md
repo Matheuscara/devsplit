@@ -122,7 +122,7 @@ Seis telas, foco em densidade e clareza (estilo dev-tool — Linear/Raycast).
 ### Testes do núcleo (só precisa de Rust)
 
 ```bash
-cargo test -p devsplit-core              # 18 testes (inclui e2e cliente-TLS → proxy → backend)
+cargo test -p devsplit-core              # 32 testes (inclui e2e cliente-TLS → proxy → backend)
 cargo test -p devsplit-core -- --ignored # + teste de rede (DNS direto)
 ```
 
@@ -222,7 +222,7 @@ revisar antes de expor? Volte p/ `releaseDraft: true` e rode `gh release edit <t
 
 | Plataforma | Estado |
 |---|---|
-| **Linux** | ✅ **rodando de ponta a ponta** — app compila, abre, intercepta; núcleo 18 testes |
+| **Linux** | ✅ **rodando de ponta a ponta** — app compila, abre, intercepta; núcleo 32 testes |
 | **macOS** | 🟡 **implementado** (elevação via `osascript`); compila no Linux via `cfg!`, **build/runtime via CI** |
 | **Windows** | 🟡 **implementado** (elevação via UAC/PowerShell); **build/runtime via CI** |
 

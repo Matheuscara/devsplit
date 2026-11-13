@@ -17,10 +17,10 @@ algo externo) · ⬜ não iniciado
 
 | Camada | Estado |
 |---|---|
-| **Núcleo `devsplit-core`** (proxy, TLS, DNS, hosts, config) | ✅ **implementado e testado** — `cargo test -p devsplit-core` = **18 passam** (1 de rede `#[ignore]`), inclui e2e TLS e redação de headers |
+| **Núcleo `devsplit-core`** (proxy, TLS, DNS, hosts, config) | ✅ **implementado e testado** — `cargo test -p devsplit-core` = **32 passam** (1 de rede `#[ignore]`), inclui e2e TLS, pooling, CORS allowlist, 421/400 edge, redação de headers |
 | **Frontend React** (`app/src/`) | ✅ **implementado** — `npm run build` passa; explorável no navegador com IPC mock |
 | **Casca Tauri** (`app/src-tauri/`) | ✅ **compila e RODA no Linux** (webkit2gtk-4.1 instalado) — app abre, lê o `devsplit.yaml`, doctor/rotas/perfis vêm do backend real (badge "TAURI", sem mock) |
-| **Elevação cross-platform** | ✅ **Linux** (pkexec/setcap/sysctl, verificado) · 🟡 **macOS** (`osascript`) e **Windows** (UAC/PowerShell) **implementados** — compilam no Linux via despacho `cfg!`; runtime a validar no SO/CI |
+| **Elevação cross-platform** | ✅ **Linux** (pkexec, heredoc com delimitador aleatório + hosts validados por RFC-1123, escrita atômica+backup, setcap com fallback sysctl condicional) · 🟡 **macOS** (`osascript`) e **Windows** (UAC/PowerShell) **implementados** — compilam no Linux via despacho `cfg!`; runtime a validar no SO/CI |
 | **Build macOS/Windows** | 🟡 **CI matriz escrito** (`.github/workflows/build.yml`, `tauri-action` ubuntu/macos/windows); pendente rodar no GitHub |
 | **Distribuição** (CI matriz, assinatura, updater) | 🟡 **CI de build/release escrito** (release draft em tag `v*`); assinatura/notarização pendente (preencher secrets) |
 
@@ -40,7 +40,7 @@ algo externo) · ⬜ não iniciado
 
 ## Núcleo (`devsplit-core`) ✅
 
-**Verificação:** `cargo test -p devsplit-core` → **18 passam, 1 ignorado (rede), 0 falhas.**
+**Verificação:** `cargo test -p devsplit-core` → **32 passam, 1 ignorado (rede), 0 falhas.**
 
 | Item | Módulo | Status | Verificação |
 |---|---|---|---|
@@ -93,7 +93,8 @@ fala com o backend real.
 | Eventos `proxy://status`/`traffic`/`notice` | ✅ (Linux) | emitidos pela casca |
 | Estado runtime + ring buffer (500) | ✅ (Linux) | `AppState` |
 | `run_doctor` **state-aware** (cert/hosts/upstream) | ✅ (Linux) | hosts: ligado→bloco deve existir; **desligado+bloco = órfão (aviso)** |
-| Sessão root persistente (1 prompt, pkexec) | ✅ (Linux) | `setcap`/`sysctl`/hosts via heredoc; **só Linux** |
+| Sessão root persistente (1 prompt, pkexec) | ✅ (Linux) | hosts validados (RFC-1123) + heredoc aleatório + escrita atômica/backup; `setcap`/`sysctl` (fallback condicional) via script; **só Linux** |
+| Ciclo start/stop serializado (lock) + sinais (SIGTERM/SIGINT) + fechar janela → tray | ✅ (Linux) | evita corrida botão×tray; reverte hosts em kill/logout |
 | Tray + single-instance + autostart | ✅ (Linux) | plugins registrados; app sobe sem panic (smoke test) |
 | Hot-reload (`devsplit.yaml`, polling 2s) | ✅ (Linux) | watcher no `setup` |
 | Re-resolução de IP (auto 60s + manual) | ✅ (Linux) | task + `reresolve_upstream` |
@@ -114,13 +115,13 @@ fala com o backend real.
    (`.github/workflows/build.yml`) escrito; falta **rodar no GitHub Actions**.
 4. 🟡 **Packaging/assinatura**: o CI cria **release draft** em tag `v*` com os instaladores;
    assinatura/notarização pendente (Developer ID/notarização mac, EV/Azure win — preencher secrets).
-5. 🟡 Reconciliar o bloco **`cors`** (aplicar allowlist no motor ou remover do schema).
 
 ---
 
-> **Última atualização:** Linux **end-to-end rodando** (núcleo **18 testes** + redação de
-> headers; casca Tauri compila/executa; `devUrl` removido → assets embutidos, `cargo run`;
-> doctor state-aware + `cleanup_hosts`). **Elevação cross-platform implementada** (Linux
-> pkexec; macOS osascript; Windows UAC — despacho `cfg!`, compila no Linux) e **CI matriz
-> `tauri-action`** escrito (`.github/workflows/build.yml`). Pendente: rodar o CI (build/
-> release macOS/Windows) e assinatura/notarização.
+> **Última atualização:** Linux **end-to-end rodando** (núcleo **32 testes**: fronteira de
+> prefixo por segmento, CORS allowlist/regex aplicada de verdade, timeouts + pool de
+> conexão upstream, 421/400 para Host desconhecido/ausente, X-Forwarded-*/strip hop-by-hop,
+> preview de body comprimido). Casca Tauri: heredoc root com hosts validados (RFC-1123) e
+> delimitador aleatório, escrita de hosts atômica+backup, ciclo start/stop serializado,
+> reversão em SIGTERM/SIGINT, fechar janela → tray, DNS direto com fallback pro resolver
+> do sistema. Pendente: rodar o CI (build/release macOS/Windows) e assinatura/notarização.

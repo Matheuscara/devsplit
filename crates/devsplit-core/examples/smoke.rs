@@ -42,9 +42,9 @@ async fn main() {
             resolve_host: fqdn.clone(),
             fixed_ip: Some(ip),
             port: 443,
-            verify: true,
         },
         extra_hosts: Vec::new(),
+        cors: Default::default(),
     };
     let shared = Arc::new(ArcSwap::from_pointee(cfg));
     let listen = format!("127.0.0.1:{port}").parse().unwrap();

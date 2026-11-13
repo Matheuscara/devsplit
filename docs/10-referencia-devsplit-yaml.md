@@ -97,7 +97,7 @@ defaults:
 | `resolve` | `string` | **sim** | — | FQDN resolvido via **DNS direto** (ignora `/etc/hosts`) p/ achar o IP real. |
 | `address` | `string` (`ip:port`) | não | `null` | **Pin de IP fixo**; quando presente dispensa a resolução DNS (vira `fixed_ip`). |
 | `sni` | `string` | **sim** | — | `ServerName` no upstream **e** alvo da validação do cert remoto. |
-| `verify` | `bool` | não | **`true`** | Validar o cert remoto. **Nunca `false`** em stage real. |
+| `verify` | `bool` | não | **`true`** | Validar o cert remoto. `verify: false` é **rejeitado** no load do config (erro claro) — o motor nunca desabilita a validação. |
 
 > A porta do passthrough vem de `address` (se dado) ou default **443**.
 
@@ -143,18 +143,18 @@ arquivo.
 
 ## 7. `cors` (`CorsSpec`)
 
-| Campo | Tipo | Default | Consumido? |
+| Campo | Tipo | Default | Nota |
 |---|---|---|---|
-| `enabled` | `bool` | `false` | — |
-| `allow_origins` | `[string]` | `[]` | — |
-| `allow_credentials` | `bool` | `false` | — |
+| `enabled` | `bool` | `false` | Desligado (default): o motor não toca em nenhum header CORS/`Vary`, passa o upstream intacto. |
+| `allow_origins` | `[string]` | `[]` | Allowlist por igualdade exata. |
+| `allow_origins_regex` | `[string]` | `[]` | Allowlist por regex (ancore com `^...$`); erro claro no load se algum padrão não compilar. |
+| `allow_credentials` | `bool` | `false` | Só envia `Access-Control-Allow-Credentials: true` quando `true` **e** a origin foi aceita. |
 
-> `[VERIFICAR]` **Divergência real:** o `examples/devsplit.yaml` inclui
-> `allow_origins_regex`, mas o `CorsSpec` **não tem** esse campo — o serde o **ignora**
-> silenciosamente. Além disso, o motor de proxy hoje **espelha a `Origin`** da request em
-> vez de aplicar a allowlist de `allow_origins` (`02` §2.3). Ou seja: o bloco `cors` é,
-> hoje, mais documental que efetivo no roteamento. Reconciliar (aplicar a allowlist no
-> motor, ou adicionar `allow_origins_regex` ao `CorsSpec`) é trabalho aberto.
+**Consumido de verdade pelo motor** (`CorsPolicy` em `types.rs`, aplicada em `proxy/mod.rs`):
+preflight (`OPTIONS` com `Access-Control-Request-Method`) responde `204` na borda só com os
+headers de allow quando a origin casa `allow_origins`/`allow_origins_regex`; `Vary: Origin` é
+**acrescentado** (não sobrescreve o que o upstream já mandou); `OPTIONS` que não é preflight
+real segue para o upstream normalmente.
 
 ---
 

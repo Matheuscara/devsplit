@@ -103,16 +103,17 @@ Fluxo de `handle` (por requisição):
 | `send_maybe_upgrade` | se a resposta for `101`, faz `copy_bidirectional` (túnel WS). |
 | `redact_headers` | redige `cookie`/`set-cookie`/`x-api-key`/`proxy-authorization` + qualquer header contendo `secret`/`token`; **mantém `authorization` visível** (é o que o painel de Sessão inspeciona). |
 
-### 2.3 CORS (divergência anotada)
+### 2.3 CORS (allowlist aplicada)
 
-O CORS é **inline** no motor (não `tower-http`): `cors_preflight` responde `204` ao
-`OPTIONS` espelhando `Access-Control-Request-Headers`; `add_cors` espelha a `Origin` (ou
-`*` quando ausente), com métodos fixos, `Allow-Credentials: true` e `Vary: Origin`.
-
-> `[VERIFICAR]` O `devsplit.yaml` tem um bloco `cors` com `allow_origins`/
-> `allow_origins_regex`, mas o `CorsSpec` do núcleo só lê `enabled`/`allow_origins`/
-> `allow_credentials` (o `allow_origins_regex` do `examples/` é **ignorado** pelo serde) e
-> o motor **espelha a origin** em vez de aplicar uma allowlist. Reconciliar em `10` §6.
+O CORS é **inline** no motor (não `tower-http`), consultando `cfg.cors: CorsPolicy`.
+Desligado (`enabled: false`, default): nenhum header CORS/`Vary` é tocado, upstream passa
+intacto. Ligado: preflight real (`OPTIONS` + `Access-Control-Request-Method`) responde
+`204` na borda só com os headers de allow quando a origin casa `allow_origins`/
+`allow_origins_regex` (regex compilada no load do config); `Access-Control-Allow-Credentials`
+só quando `allow_credentials: true` **e** origin aceita; `Vary: Origin` é **acrescentado**,
+nunca sobrescreve o que o upstream já mandou. `OPTIONS` que não é preflight (sem
+`Access-Control-Request-Method`) segue para o upstream normalmente. Schema completo em
+`10` §7.
 
 ### 2.4 TLS/CA (`tlsca.rs`) — resumo
 
@@ -182,17 +183,24 @@ A casca emite; a UI escuta via `listen`.
 Hoje **Linux/pkexec**. `PrivSession` mantém um `pkexec /bin/sh` **vivo**: a senha é pedida
 **uma vez** (no spawn) e os scripts root são alimentados por stdin pelo resto da sessão —
 acaba com o "duas senhas por ligar/desligar". `build_priv_script` grava o arquivo hosts
-via heredoc (sem temp file → sem TOCTOU) e, no ligar, roda
-`setcap cap_net_bind_service=+ep <exe>` + `sysctl -w net.ipv4.ip_unprivileged_port_start=443`
-para bindar a `:443` sem root daí em diante. `which()` resolve caminhos absolutos (pkexec
-zera o `PATH`). Detalhe e o plano macOS/Windows em `11` §3 e `04` §3.
+via heredoc com **delimitador aleatório por chamada** (hostnames validados por RFC-1123 no
+load do config, contra injeção no heredoc), escrita **atômica** (tempfile + `mv -f`, com
+backup `.devsplit.bak` na primeira vez). No ligar, roda `setcap cap_net_bind_service=+ep
+<exe>`; o fallback `sysctl -w net.ipv4.ip_unprivileged_port_start=443` só dispara **se o
+setcap falhar**. `which()` (crate `which`) resolve caminhos absolutos (pkexec zera o
+`PATH`). Start/stop são serializados por um lock; SIGTERM/SIGINT revertem o hosts antes de
+sair; fechar a janela esconde p/ a tray (só "Sair" derruba de verdade). Detalhe e o plano
+macOS/Windows em `11` §3 e `04` §3.
 
 ### 3.5 Plugins, tray e hot-reload
 
-`tauri_plugin_single_instance` (só 1 dono de `:443`), `tauri_plugin_shell` (rodar
-`mkcert`), `tauri_plugin_autostart` (LaunchAgent no macOS). O `setup` carrega a config,
-monta o **tray** e dispara um watcher que faz **polling de 2s** do `devsplit.yaml`:
-mudou → recarrega do disco e emite `proxy://notice`.
+`tauri_plugin_single_instance` (só 1 dono de `:443`), `tauri_plugin_autostart` (LaunchAgent
+no macOS), `tauri_plugin_dialog`+`tauri_plugin_fs` (export HAR com save-dialog nativo,
+escopo restrito ao arquivo escolhido pelo usuário). Sem `tauri_plugin_shell` — todo
+spawn de processo (mkcert, pkexec, osascript, powershell) é `std::process::Command` no
+lado Rust, nunca exposto ao webview. O `setup` carrega a config, monta o **tray** e dispara
+um watcher que faz **polling de 2s** do `devsplit.yaml`: mudou → recarrega do disco e
+emite `proxy://notice` + `proxy://status`.
 
 ### 3.6 Descoberta da config
 

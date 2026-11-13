@@ -10,11 +10,11 @@
 //! WebView2 (Windows) ou WKWebView (macOS). O nucleo (`devsplit-core`) compila
 //! e e testado em qualquer lugar. Ver README.
 
+use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
-use std::collections::VecDeque;
 
 use arc_swap::ArcSwap;
 use serde::{Deserialize, Serialize};
@@ -26,7 +26,7 @@ use tokio::sync::{mpsc, Mutex};
 use devsplit_core::config::{self, DevsplitConfig};
 use devsplit_core::proxy::{self, ProxyHandle, SharedConfig};
 use devsplit_core::types::{
-    Decision, ProxyConfig, Route, RouteTable, TrafficEvent, Upstream,
+    Decision, PassthroughTarget, ProxyConfig, Route, RouteTable, TrafficEvent, Upstream,
 };
 use devsplit_core::{dns, hostsfile, tlsca};
 
@@ -36,6 +36,9 @@ const LEAF_MAX_DAYS: u32 = 825;
 #[derive(Default)]
 struct AppState {
     cfg: Mutex<Option<DevsplitConfig>>,
+    /// Motivo de o devsplit.yaml ter sido recusado no carregamento (ex.: host
+    /// invalido), p/ a UI mostrar algo melhor que "nenhum devsplit.yaml".
+    cfg_error: Mutex<Option<String>>,
     profile: Mutex<String>,
     /// Rotas locais editaveis pela UI (catch-all/passthrough nao entra aqui).
     routes: Mutex<Vec<RouteDto>>,
@@ -43,9 +46,12 @@ struct AppState {
     shared: Mutex<Option<SharedConfig>>,
     handle: Mutex<Option<ProxyHandle>>,
     running: Mutex<bool>,
-    /// IP real do stage resolvido via DNS direto, cacheado enquanto ligado
-    /// (evita re-resolver a cada toggle/reload).
-    resolved_ip: Arc<Mutex<Option<IpAddr>>>,
+    /// Serializa ligar/desligar por INTEIRO (botao da UI x tray x sinal): um
+    /// start em andamento (prompt do pkexec, DNS, bind) nao corre com um stop.
+    lifecycle: Mutex<()>,
+    /// IPs reais resolvidos via DNS direto, por `resolve_host` (primario +
+    /// extras), cacheados enquanto ligado (evita re-resolver a cada toggle/reload).
+    resolved: Arc<Mutex<HashMap<String, IpAddr>>>,
     /// Sessao root persistente (1 prompt por sessao) p/ hosts/setcap/sysctl/revert.
     privileged: Arc<StdMutex<Option<PrivSession>>>,
     /// Task de re-resolucao periodica do IP do stage (abortada no stop).
@@ -71,6 +77,10 @@ struct RouteDto {
     /// "local" | "passthrough"
     kind: String,
     enabled: bool,
+    /// `true` p/ rotas criadas pela UI (nao vem do devsplit.yaml). Rotas do yaml
+    /// sao re-semeadas a cada reload; so as do usuario sobrevivem fora dele.
+    #[serde(default)]
+    user_added: bool,
 }
 
 #[derive(Serialize, Clone)]
@@ -98,6 +108,7 @@ struct TrafficSummary {
     method: String,
     host: String,
     path: String,
+    query: Option<String>,
     decision: &'static str,
     status: Option<u16>,
     latency_ms: Option<u64>,
@@ -114,6 +125,7 @@ struct RequestDetail {
     method: String,
     host: String,
     path: String,
+    query: Option<String>,
     decision: &'static str,
     status: Option<u16>,
     latency_ms: Option<u64>,
@@ -147,6 +159,7 @@ fn decision_str(d: &Decision) -> &'static str {
     match d {
         Decision::Local(_) => "local",
         Decision::Passthrough => "passthrough",
+        Decision::Edge => "edge",
     }
 }
 
@@ -165,6 +178,7 @@ fn traffic_summary(ev: &TrafficEvent) -> TrafficSummary {
         method: ev.method.clone(),
         host: ev.host.clone(),
         path: ev.path.clone(),
+        query: ev.query.clone(),
         decision: decision_str(&ev.decision),
         status: ev.status,
         latency_ms: ev.latency_ms,
@@ -180,6 +194,7 @@ fn request_detail(ev: &TrafficEvent) -> RequestDetail {
         method: ev.method.clone(),
         host: ev.host.clone(),
         path: ev.path.clone(),
+        query: ev.query.clone(),
         decision: decision_str(&ev.decision),
         status: ev.status,
         latency_ms: ev.latency_ms,
@@ -212,9 +227,58 @@ fn caroot(app: &AppHandle) -> Result<PathBuf, String> {
 /// Resolve o ProxyConfig do core p/ o perfil ativo (sem IP resolvido ainda).
 async fn base_proxy_config(state: &AppState) -> Result<ProxyConfig, String> {
     let cfg = state.cfg.lock().await;
-    let cfg = cfg.as_ref().ok_or("nenhum devsplit.yaml carregado — copie p/ ~/.config/dev.devsplit.app/devsplit.yaml (ou rode da pasta do repo)")?;
+    let Some(cfg) = cfg.as_ref() else {
+        if let Some(err) = state.cfg_error.lock().await.clone() {
+            return Err(err);
+        }
+        return Err("nenhum devsplit.yaml carregado — copie p/ ~/.config/dev.devsplit.app/devsplit.yaml (ou rode da pasta do repo)".into());
+    };
     let profile = state.profile.lock().await.clone();
     config::to_proxy_config(cfg, &profile, None).map_err(e2s)
+}
+
+/// Hostname RFC 1123 estrito (ASCII, labels 1-63 alfanumericos com `-` interno,
+/// total <= 253). Esses nomes vao parar no /etc/hosts escrito por um shell ROOT —
+/// qualquer coisa fora disso (espaco, newline, aspas, `$`...) e recusada.
+fn valid_hostname(h: &str) -> bool {
+    !h.is_empty()
+        && h.len() <= 253
+        && h.split('.').all(|label| {
+            let b = label.as_bytes();
+            !b.is_empty()
+                && b.len() <= 63
+                && b.iter().all(|c| c.is_ascii_alphanumeric() || *c == b'-')
+                && b[0] != b'-'
+                && b[b.len() - 1] != b'-'
+        })
+}
+
+fn ensure_valid_hosts<'a>(hosts: impl IntoIterator<Item = &'a str>) -> Result<(), String> {
+    for h in hosts {
+        if !valid_hostname(h) {
+            return Err(format!(
+                "host invalido no devsplit.yaml: {h:?} (esperado um FQDN RFC 1123, ex.: api.stage.acme.com)"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Todo host que pode virar entrada do /etc/hosts: upstream base, extras e os
+/// upstreams de cada ambiente.
+fn validate_config_hosts(cfg: &DevsplitConfig) -> Result<(), String> {
+    let base = std::iter::once(cfg.upstream.host.as_str());
+    let extras = cfg.extra_upstreams.iter().flatten().map(|u| u.host.as_str());
+    let envs = cfg.environments.values().map(|e| e.upstream.host.as_str());
+    ensure_valid_hosts(base.chain(extras).chain(envs))
+}
+
+/// Carrega + valida o devsplit.yaml (rejeita a config inteira se algum host
+/// for invalido).
+fn load_validated(path: &Path) -> Result<DevsplitConfig, String> {
+    let cfg = config::load(path).map_err(|e| format!("{e:#}"))?;
+    validate_config_hosts(&cfg).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(cfg)
 }
 
 // ---------------------------- comandos ----------------------------
@@ -242,6 +306,7 @@ async fn list_routes(state: State<'_, AppState>) -> Result<Vec<RouteDto>, String
         target: "stage real (passthrough)".into(),
         kind: "passthrough".into(),
         enabled: true,
+        user_added: false,
     });
     Ok(out)
 }
@@ -253,17 +318,36 @@ async fn add_route(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
+    let prefix = prefix.trim().to_string();
+    let target = target.trim().to_string();
+    if !prefix.starts_with('/') {
+        return Err(format!("prefixo invalido {prefix:?}: deve comecar com '/'"));
+    }
+    // Valida JA (antes de persistir): um alvo sem host:port seria descartado em
+    // silencio pelo build_runtime_config e a UI mostraria a rota como ativa.
+    if parse_local("", &prefix, &target).is_none() {
+        return Err(format!(
+            "destino invalido {target:?}: use host:porta (ex.: 127.0.0.1:3000 ou http://localhost:5173)"
+        ));
+    }
     {
         let mut routes = state.routes.lock().await;
         routes.retain(|r| r.prefix != prefix);
         routes.push(RouteDto {
-            prefix,
+            prefix: prefix.clone(),
             target,
             kind: "local".into(),
             enabled: true,
+            user_added: true,
         });
     }
-    persist_routes(&app, &state).await;
+    {
+        let profile = state.profile.lock().await.clone();
+        let mut overlay = load_overlay(&app, &profile);
+        overlay.removed.retain(|p| *p != prefix);
+        overlay.routes = state.routes.lock().await.clone();
+        save_overlay(&app, &profile, &overlay);
+    }
     reload_if_running(&app, &state).await
 }
 
@@ -273,8 +357,22 @@ async fn remove_route(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    state.routes.lock().await.retain(|r| r.prefix != prefix);
-    persist_routes(&app, &state).await;
+    let was_yaml = {
+        let mut routes = state.routes.lock().await;
+        let was_yaml = routes.iter().any(|r| r.prefix == prefix && !r.user_added);
+        routes.retain(|r| r.prefix != prefix);
+        was_yaml
+    };
+    {
+        let profile = state.profile.lock().await.clone();
+        let mut overlay = load_overlay(&app, &profile);
+        // rota do yaml removida pela UI: lapide, senao o proximo reload a re-semeia.
+        if was_yaml && !overlay.removed.contains(&prefix) {
+            overlay.removed.push(prefix);
+        }
+        overlay.routes = state.routes.lock().await.clone();
+        save_overlay(&app, &profile, &overlay);
+    }
     reload_if_running(&app, &state).await
 }
 
@@ -314,12 +412,17 @@ async fn set_profile(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    *state.profile.lock().await = name;
-    // re-semeia as rotas do novo perfil
+    {
+        let cfg = state.cfg.lock().await;
+        let names = cfg.as_ref().map(config::profile_names).unwrap_or_default();
+        if !names.contains(&name) {
+            return Err(format!("perfil '{name}' não encontrado"));
+        }
+    }
+    *state.profile.lock().await = name.clone();
+    // re-semeia as rotas do novo perfil (yaml + overlay salvo)
     let pcfg = base_proxy_config(&state).await?;
-    let profile = state.profile.lock().await.clone();
-    *state.routes.lock().await =
-        load_saved_routes(&app, &profile).unwrap_or_else(|| routes_from(&pcfg));
+    *state.routes.lock().await = merge_routes(routes_from(&pcfg), load_overlay(&app, &name));
     reload_if_running(&app, &state).await
 }
 
@@ -331,20 +434,46 @@ fn routes_state_path(app: &AppHandle) -> Option<PathBuf> {
         .map(|d| d.join("routes-state.json"))
 }
 
-/// Persiste as rotas runtime do perfil ativo (sobrevive a reinicios). NAO mexe
-/// no devsplit.yaml — preserva os comentarios/`extends` que voce edita a mao.
-async fn persist_routes(app: &AppHandle, state: &AppState) {
+/// Overlay runtime de um perfil: o devsplit.yaml e a fonte de QUAIS rotas
+/// existem; aqui fica so o que a UI mudou por cima (enabled por prefixo, rotas
+/// adicionadas pelo usuario e lapides de rotas do yaml removidas na UI).
+#[derive(Serialize, Deserialize, Default)]
+struct RouteOverlay {
+    #[serde(default)]
+    routes: Vec<RouteDto>,
+    #[serde(default)]
+    removed: Vec<String>,
+}
+
+fn read_overlay_map(app: &AppHandle) -> serde_json::Map<String, serde_json::Value> {
+    routes_state_path(app)
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+/// Carrega o overlay do perfil. Aceita o formato antigo (array de rotas).
+fn load_overlay(app: &AppHandle, profile: &str) -> RouteOverlay {
+    let map = read_overlay_map(app);
+    match map.get(profile) {
+        Some(v @ serde_json::Value::Array(_)) => RouteOverlay {
+            routes: serde_json::from_value(v.clone()).unwrap_or_default(),
+            removed: Vec::new(),
+        },
+        Some(v) => serde_json::from_value(v.clone()).unwrap_or_default(),
+        None => RouteOverlay::default(),
+    }
+}
+
+/// Persiste o overlay do perfil (sobrevive a reinicios). NAO mexe no
+/// devsplit.yaml — preserva os comentarios/`extends` que voce edita a mao.
+fn save_overlay(app: &AppHandle, profile: &str, overlay: &RouteOverlay) {
     let Some(path) = routes_state_path(app) else {
         return;
     };
-    let profile = state.profile.lock().await.clone();
-    let routes = state.routes.lock().await.clone();
-    let mut map: serde_json::Map<String, serde_json::Value> = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default();
-    if let Ok(v) = serde_json::to_value(&routes) {
-        map.insert(profile, v);
+    let mut map = read_overlay_map(app);
+    if let Ok(v) = serde_json::to_value(overlay) {
+        map.insert(profile.to_string(), v);
     }
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -354,12 +483,41 @@ async fn persist_routes(app: &AppHandle, state: &AppState) {
     }
 }
 
-/// Carrega as rotas salvas do perfil, se houver.
-fn load_saved_routes(app: &AppHandle, profile: &str) -> Option<Vec<RouteDto>> {
-    let path = routes_state_path(app)?;
-    let s = std::fs::read_to_string(&path).ok()?;
-    let map: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&s).ok()?;
-    serde_json::from_value(map.get(profile)?.clone()).ok()
+/// Persiste o estado atual das rotas do perfil ativo, mantendo as lapides.
+async fn persist_routes(app: &AppHandle, state: &AppState) {
+    let profile = state.profile.lock().await.clone();
+    let mut overlay = load_overlay(app, &profile);
+    overlay.routes = state.routes.lock().await.clone();
+    save_overlay(app, &profile, &overlay);
+}
+
+/// Aplica o overlay sobre as rotas semeadas do yaml:
+/// - rota do yaml com lapide -> some;
+/// - rota do yaml com entrada salva do usuario (add_route no mesmo prefixo) ->
+///   usa a do usuario; senao herda so o `enabled` salvo;
+/// - rotas do usuario fora do yaml -> acrescentadas;
+/// - entradas salvas que vieram do yaml mas sairam dele -> descartadas.
+fn merge_routes(seeded: Vec<RouteDto>, overlay: RouteOverlay) -> Vec<RouteDto> {
+    let RouteOverlay { routes: saved, removed } = overlay;
+    let mut out: Vec<RouteDto> = seeded
+        .into_iter()
+        .filter(|r| !removed.contains(&r.prefix))
+        .map(|mut r| {
+            if let Some(s) = saved.iter().find(|s| s.prefix == r.prefix) {
+                if s.user_added {
+                    return s.clone();
+                }
+                r.enabled = s.enabled;
+            }
+            r
+        })
+        .collect();
+    for s in saved {
+        if s.user_added && !out.iter().any(|r| r.prefix == s.prefix) {
+            out.push(s);
+        }
+    }
+    out
 }
 
 #[tauri::command]
@@ -456,6 +614,9 @@ async fn start_proxy(app: AppHandle, state: State<'_, AppState>) -> Result<(), S
 /// em QUALQUER falha (config ausente, bind, elevacao) — senao a falha vira uma
 /// promise solta na UI e o usuario ve "nada acontece".
 async fn start_proxy_run(app: &AppHandle, state: &AppState) -> Result<(), String> {
+    // Segura o lock do ciclo de vida durante TODO o ligar: um stop/start
+    // concorrente (UI x tray x sinal) espera em vez de correr com este.
+    let _lifecycle = state.lifecycle.lock().await;
     if *state.running.lock().await {
         return Ok(());
     }
@@ -465,6 +626,8 @@ async fn start_proxy_run(app: &AppHandle, state: &AppState) -> Result<(), String
     let all_hosts: Vec<String> = std::iter::once(pcfg.intercept_host.clone())
         .chain(pcfg.extra_hosts.iter().map(|h| h.host.clone()))
         .collect();
+    // Defesa extra: estes nomes vao p/ um script root (ja validados no load).
+    ensure_valid_hosts(all_hosts.iter().map(String::as_str))?;
 
     // CA + leaf locais + ServerConfig (sem privilegio).
     let caroot = caroot(app)?;
@@ -504,17 +667,18 @@ async fn start_proxy_run(app: &AppHandle, state: &AppState) -> Result<(), String
     let ring = state.traffic.clone();
     tokio::spawn(async move {
         while let Some(ev) = rx.recv().await {
-            if ev.status == Some(502) {
-                let (level, message) = match &ev.decision {
-                    Decision::Local(target) => (
-                        "warn",
-                        format!("Servico local nao respondeu ({target}) em {}", ev.path),
-                    ),
-                    Decision::Passthrough => (
-                        "error",
-                        format!("Stage inalcancavel em {} (VPN ligada?)", ev.path),
-                    ),
-                };
+            let notice = match (ev.status, &ev.decision) {
+                (Some(502), Decision::Local(target)) => Some((
+                    "warn",
+                    format!("Servico local nao respondeu ({target}) em {}", ev.path),
+                )),
+                (Some(502), Decision::Passthrough) => Some((
+                    "error",
+                    format!("Stage inalcancavel em {} (VPN ligada?)", ev.path),
+                )),
+                _ => None,
+            };
+            if let Some((level, message)) = notice {
                 let _ = app_traffic.emit("proxy://notice", Notice { level, message });
             }
             let _ = app_traffic.emit("proxy://traffic", traffic_summary(&ev));
@@ -527,40 +691,20 @@ async fn start_proxy_run(app: &AppHandle, state: &AppState) -> Result<(), String
         }
     });
 
-    // Task de re-resolucao: a cada 60s checa a saude do IP pinado e re-resolve
-    // via DNS direto; se o IP do stage mudou (LB rotacionou) ou caiu, troca a
-    // quente sem dropar conexao.
+    // Task de re-resolucao: a cada 60s checa a saude de cada IP pinado (primario
+    // + hosts extras) e re-resolve via DNS direto; se o IP mudou (LB rotacionou)
+    // ou caiu, troca a quente sem dropar conexao.
     let reresolve = {
         let shared = shared.clone();
-        let resolved_ip = state.resolved_ip.clone();
         let app = app.clone();
-        let resolve_host = pcfg.passthrough.resolve_host.clone();
-        let port = pcfg.passthrough.port;
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
             tick.tick().await; // consome o tick imediato
             loop {
                 tick.tick().await;
-                let current = shared.load_full();
-                let cur_ip = current.passthrough.fixed_ip;
-                let healthy = match cur_ip {
-                    Some(ip) => tokio::time::timeout(
-                        std::time::Duration::from_secs(3),
-                        tokio::net::TcpStream::connect((ip, port)),
-                    )
-                    .await
-                    .map(|r| r.is_ok())
-                    .unwrap_or(false),
-                    None => false,
-                };
-                if let Ok(new_ip) = dns::resolve_direct(&resolve_host).await {
-                    if Some(new_ip) != cur_ip || !healthy {
-                        let mut next = (*current).clone();
-                        next.passthrough.fixed_ip = Some(new_ip);
-                        shared.store(Arc::new(next));
-                        *resolved_ip.lock().await = Some(new_ip);
-                        let _ = app.emit("proxy://status", status_dto(&current, true));
-                    }
+                let (changed, _errors) = reresolve_targets(&app, Some(&shared), true).await;
+                if changed {
+                    let _ = app.emit("proxy://status", status_dto(&shared.load_full(), true));
                 }
             }
         })
@@ -583,13 +727,14 @@ async fn stop_proxy(app: AppHandle, state: State<'_, AppState>) -> Result<(), St
     Ok(())
 }
 
-/// Teardown completo do runtime, reusado pelo botao "Desligar" E pelo fechar do
-/// app (`RunEvent::ExitRequested`): derruba o servidor e espera liberar a :443,
-/// aborta a re-resolucao, reverte o /etc/hosts (remove o bloco + entradas soltas
-/// do FQDN -> stage volta a ser alcancavel) e RETIRA a CA do trust store do
-/// navegador. Acoplado ao split: nada fica ativo depois de desligar/fechar.
-/// Hosts e CA sao best-effort — falha de um nao impede o outro.
+/// Teardown completo do runtime, reusado pelo botao "Desligar", pelo "Sair" do
+/// tray (`RunEvent::ExitRequested`) e por SIGTERM/SIGINT/SIGHUP: derruba o
+/// servidor e espera liberar a :443, aborta a re-resolucao, reverte o /etc/hosts
+/// (remove o bloco + entradas soltas do FQDN -> stage volta a ser alcancavel) e
+/// RETIRA a CA do trust store do navegador. Hosts e CA sao best-effort — falha
+/// de um nao impede o outro.
 async fn shutdown_runtime(app: &AppHandle, state: &AppState) {
+    let _lifecycle = state.lifecycle.lock().await;
     if let Some(h) = state.handle.lock().await.take() {
         h.shutdown().await;
     }
@@ -598,7 +743,7 @@ async fn shutdown_runtime(app: &AppHandle, state: &AppState) {
     if let Some(t) = state.reresolve_task.lock().await.take() {
         t.abort();
     }
-    *state.resolved_ip.lock().await = None;
+    state.resolved.lock().await.clear();
 
     if let Ok(pcfg) = base_proxy_config(state).await {
         let hosts: Vec<String> = std::iter::once(pcfg.intercept_host.clone())
@@ -607,6 +752,24 @@ async fn shutdown_runtime(app: &AppHandle, state: &AppState) {
         let _ = revert_hosts(state.privileged.clone(), &hosts).await;
     }
     let _ = uninstall_ca(app).await;
+}
+
+/// Garante um unico teardown por processo (Sair do tray, sinal, exit(0) final).
+static TEARING_DOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// `true` so p/ o primeiro chamador — quem deve rodar `teardown_and_exit`.
+fn begin_teardown() -> bool {
+    !TEARING_DOWN.swap(true, std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Teardown completo e saida real do processo. O `exit(0)` re-dispara
+/// `ExitRequested`, que ve `TEARING_DOWN` ja setado e deixa sair.
+async fn teardown_and_exit(app: AppHandle) {
+    {
+        let state = app.state::<AppState>();
+        shutdown_runtime(&app, &state).await;
+    }
+    app.exit(0);
 }
 
 /// Remove um bloco ORFAO do /etc/hosts (sessao anterior fechada sem desligar),
@@ -702,10 +865,6 @@ impl PrivSession {
             }
             if let Some(code) = buf.trim().strip_prefix("__DSEND__") {
                 let code: i32 = code.trim().parse().unwrap_or(-1);
-                let _ = std::fs::write(
-                    "/tmp/devsplit-bootstrap.log",
-                    format!("script:\n{script}\n---\nexit:{code}\nout:\n{out}"),
-                );
                 return if code == 0 {
                     Ok(())
                 } else {
@@ -717,33 +876,87 @@ impl PrivSession {
     }
 }
 
-/// Monta o script root: grava `content` no arquivo hosts via heredoc (sem temp
-/// file -> sem TOCTOU). Com `exe` (no ativar), tambem libera o bind na :443.
-fn build_priv_script(hosts_path: &Path, content: &str, exe: Option<&Path>) -> String {
-    let hp = hosts_path.display();
+/// Quote POSIX-sh: `'...'` com cada `'` interno virando `'\''`.
+fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+/// `n` digitos hex aleatorios. `RandomState` e semeado do SO por instancia; o
+/// contador + relogio so garantem que chamadas seguidas nunca repetem.
+fn random_hex(n: usize) -> String {
+    use std::hash::{BuildHasher, Hasher};
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let mut out = String::with_capacity(n + 16);
+    while out.len() < n {
+        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        h.write_u64(COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+        h.write_u128(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+        );
+        out.push_str(&format!("{:016x}", h.finish()));
+    }
+    out.truncate(n);
+    out
+}
+
+/// Delimitador de heredoc aleatorio por chamada, garantidamente ausente do corpo
+/// (defesa em profundidade alem da validacao de hostnames).
+fn heredoc_delim(body: &str) -> String {
+    loop {
+        let d = format!("__DS{}__", random_hex(12));
+        if !body.lines().any(|l| l == d) {
+            return d;
+        }
+    }
+}
+
+/// Script root que grava `content` no arquivo hosts de forma ATOMICA: backup
+/// `<hosts>.devsplit.bak` na primeira vez, escrita num temp no MESMO diretorio
+/// (dono root, nao gravavel por usuario) e `mv` por cima do alvo. O status do
+/// script e o da escrita.
+fn hosts_write_script(hosts_path: &Path, content: &str) -> String {
+    let hp = hosts_path.to_string_lossy();
+    let tmp = hosts_path
+        .parent()
+        .unwrap_or_else(|| Path::new("/etc"))
+        .join(".devsplit-hosts.tmp");
+    let hp_q = sh_quote(&hp);
+    let bak_q = sh_quote(&format!("{hp}.devsplit.bak"));
+    let tmp_q = sh_quote(&tmp.to_string_lossy());
     let body = content.trim_end_matches('\n');
-    let mut s = format!("cat > '{hp}' <<'__DSHOSTS__'\n{body}\n__DSHOSTS__\n");
-    if let Some(_exe) = exe {
-        #[cfg(target_os = "linux")]
-        {
-            let exe = _exe.display();
+    let delim = heredoc_delim(body);
+    format!(
+        "[ -f {bak_q} ] || cp -p {hp_q} {bak_q} 2>/dev/null || true\n\
+         rm -f {tmp_q}\n\
+         cat > {tmp_q} <<'{delim}' && chmod 644 {tmp_q} && mv -f {tmp_q} {hp_q}\n\
+         {body}\n\
+         {delim}\n"
+    )
+}
+
+/// Monta o script root: com `exe` (no ativar) libera o bind na :443 e, por
+/// ultimo, grava `content` no arquivo hosts (atomico; o exit code do script e o
+/// da escrita do hosts).
+fn build_priv_script(hosts_path: &Path, content: &str, exe: Option<&Path>) -> String {
+    let mut s = String::new();
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(exe) = exe {
+            // sysctl SO como fallback do setcap (ex.: AppImage em squashfs
+            // read-only): ele baixa o piso de portas p/ a maquina inteira.
             s.push_str(&format!(
-                "setcap cap_net_bind_service=+ep '{exe}' 2>/dev/null || true\n\
-                 sysctl -w net.ipv4.ip_unprivileged_port_start=443 >/dev/null 2>&1 || true\n"
+                "setcap cap_net_bind_service=+ep {} 2>/dev/null || sysctl -w net.ipv4.ip_unprivileged_port_start=443 >/dev/null 2>&1 || true\n",
+                sh_quote(&exe.to_string_lossy())
             ));
         }
     }
+    #[cfg(not(target_os = "linux"))]
+    let _ = exe;
+    s.push_str(&hosts_write_script(hosts_path, content));
     s
-}
-/// Resolve o caminho absoluto de um binario (pkexec zera o PATH, entao embutimos).
-fn which(bin: &str) -> Option<String> {
-    let out = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(format!("command -v {bin}"))
-        .output()
-        .ok()?;
-    let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    (out.status.success() && !p.is_empty()).then_some(p)
 }
 
 /// Bootstrap privilegiado (no ativar): grava o bloco no arquivo hosts e libera
@@ -753,7 +966,7 @@ async fn bootstrap_privileges(
     hosts: &[String],
 ) -> Result<(), String> {
     let hp = hostsfile::hosts_path();
-    let existing = std::fs::read_to_string(&hp).unwrap_or_default();
+    let existing = hostsfile::read_hosts_lossy(&hp);
     let entries: Vec<(IpAddr, String)> = hosts.iter().map(|h| (loopback(), h.clone())).collect();
     let content = hostsfile::render(&existing, &entries);
     if cfg!(target_os = "linux") {
@@ -774,7 +987,7 @@ async fn revert_hosts(
     hosts: &[String],
 ) -> Result<(), String> {
     let hp = hostsfile::hosts_path();
-    let existing = std::fs::read_to_string(&hp).map_err(e2s)?;
+    let existing = hostsfile::read_hosts_lossy(&hp);
     let host_refs: Vec<&str> = hosts.iter().map(|s| s.as_str()).collect();
     let needs = hostsfile::has_block(&existing)
         || existing.lines().any(|l| {
@@ -811,21 +1024,37 @@ async fn apply_hosts_oneshot(hp: &Path, content: &str) -> Result<(), String> {
     }
 }
 
-/// macOS: grava num temp do usuario e copia p/ o hosts via UM prompt de admin
-/// (`osascript … with administrator privileges`). bind :443 nao precisa de root (Mojave+).
+/// macOS: grava num temp do usuario e, via UM prompt de admin (`osascript …
+/// with administrator privileges`), faz backup-se-ausente + copia p/ um temp no
+/// diretorio do hosts + `mv` atomico. bind :443 nao precisa de root (Mojave+).
 async fn apply_hosts_macos(hp: &Path, content: &str) -> Result<(), String> {
     let hp = hp.to_path_buf();
     let content = content.to_string();
     tokio::task::spawn_blocking(move || {
-        let tmp = std::env::temp_dir().join("devsplit-hosts.tmp");
-        std::fs::write(&tmp, &content).map_err(|e| e.to_string())?;
+        let user_tmp = std::env::temp_dir().join(format!("devsplit-hosts-{}.tmp", random_hex(12)));
+        std::fs::write(&user_tmp, &content).map_err(|e| e.to_string())?;
+        let hp_s = hp.to_string_lossy();
+        let stage = hp
+            .parent()
+            .unwrap_or_else(|| Path::new("/private/etc"))
+            .join(".devsplit-hosts.tmp");
+        let (hp_q, bak_q, stage_q, src_q) = (
+            sh_quote(&hp_s),
+            sh_quote(&format!("{hp_s}.devsplit.bak")),
+            sh_quote(&stage.to_string_lossy()),
+            sh_quote(&user_tmp.to_string_lossy()),
+        );
+        let sh = format!(
+            "{{ [ -f {bak_q} ] || cp -p {hp_q} {bak_q} 2>/dev/null || true; }}; \
+             rm -f {stage_q} && cp {src_q} {stage_q} && chmod 644 {stage_q} && mv -f {stage_q} {hp_q}"
+        );
+        // string AppleScript: escapa `\` e `"`.
         let osa = format!(
-            "do shell script \"/bin/cp '{}' '{}'\" with administrator privileges",
-            tmp.display(),
-            hp.display()
+            "do shell script \"{}\" with administrator privileges",
+            sh.replace('\\', "\\\\").replace('"', "\\\"")
         );
         let status = std::process::Command::new("osascript").arg("-e").arg(&osa).status();
-        let _ = std::fs::remove_file(&tmp);
+        let _ = std::fs::remove_file(&user_tmp);
         match status {
             Ok(s) if s.success() => Ok(()),
             Ok(_) => Err("elevacao via osascript falhou ou foi cancelada".to_string()),
@@ -836,23 +1065,30 @@ async fn apply_hosts_macos(hp: &Path, content: &str) -> Result<(), String> {
     .map_err(|e| e.to_string())?
 }
 
-/// Windows: grava num temp do usuario e copia p/ o hosts via UAC
-/// (`Start-Process … -Verb RunAs`). Sem porta privilegiada — bind :443 livre.
+/// Windows: grava num temp do usuario e, via UAC (`Start-Process … -Verb RunAs`),
+/// faz backup-se-ausente + copia p/ um temp no diretorio do hosts + `move /Y`
+/// (rename no mesmo volume). Sem porta privilegiada — bind :443 livre.
 async fn apply_hosts_windows(hp: &Path, content: &str) -> Result<(), String> {
     let hp = hp.to_path_buf();
     let content = content.to_string();
     tokio::task::spawn_blocking(move || {
-        let tmp = std::env::temp_dir().join("devsplit-hosts.tmp");
-        std::fs::write(&tmp, &content).map_err(|e| e.to_string())?;
-        let copy = format!("copy /Y \"{}\" \"{}\"", tmp.display(), hp.display());
+        let user_tmp = std::env::temp_dir().join(format!("devsplit-hosts-{}.tmp", random_hex(12)));
+        std::fs::write(&user_tmp, &content).map_err(|e| e.to_string())?;
+        let hp_s = hp.display().to_string();
+        let bak = format!("{hp_s}.devsplit.bak");
+        let stage = hp.with_file_name("hosts.devsplit.tmp").display().to_string();
+        let cmdline = format!(
+            "(if not exist \"{bak}\" copy /Y \"{hp_s}\" \"{bak}\" >nul) & copy /Y \"{}\" \"{stage}\" >nul && move /Y \"{stage}\" \"{hp_s}\" >nul",
+            user_tmp.display()
+        );
         let ps = format!(
             "$p = Start-Process -FilePath cmd.exe -ArgumentList '/c {}' -Verb RunAs -Wait -PassThru; exit $p.ExitCode",
-            copy.replace('\'', "''")
+            cmdline.replace('\'', "''")
         );
         let status = std::process::Command::new("powershell")
             .args(["-NoProfile", "-NonInteractive", "-Command", &ps])
             .status();
-        let _ = std::fs::remove_file(&tmp);
+        let _ = std::fs::remove_file(&user_tmp);
         match status {
             Ok(s) if s.success() => Ok(()),
             Ok(_) => Err("elevacao via UAC falhou ou foi cancelada".to_string()),
@@ -887,13 +1123,14 @@ fn routes_from(pcfg: &ProxyConfig) -> Vec<RouteDto> {
                 target: format!("{host}:{port}"),
                 kind: "local".into(),
                 enabled: true,
+                user_added: false,
             }),
             Upstream::Passthrough => None,
         })
         .collect()
 }
 
-/// Monta o ProxyConfig final aplicando as rotas runtime (UI) + IP resolvido.
+/// Monta o ProxyConfig final aplicando as rotas runtime (UI) + IPs resolvidos.
 async fn build_runtime_config(
     app: &AppHandle,
     state: &AppState,
@@ -910,32 +1147,131 @@ async fn build_runtime_config(
     pcfg.routes = RouteTable::new(entries);
     drop(routes);
 
-    // IP real via DNS direto (anti-loop). Cacheado enquanto ligado p/ NAO
-    // re-resolver a cada toggle/reload (evita reload lento/falho = "transporte nao ia").
+    // IP real via DNS direto (anti-loop), p/ o primario E cada host extra.
+    // Cacheado enquanto ligado p/ NAO re-resolver a cada toggle/reload (evita
+    // reload lento/falho = "transporte nao ia").
     if pcfg.passthrough.fixed_ip.is_none() {
-        let mut cache = state.resolved_ip.lock().await;
-        let ip = match *cache {
-            Some(ip) => ip,
-            None => {
-                let ip = dns::resolve_direct(&pcfg.passthrough.resolve_host)
-                    .await
-                    .map_err(|e| format!("falha resolvendo o IP do stage: {e}"))?;
-                *cache = Some(ip);
-                ip
-            }
-        };
+        let rh = pcfg.passthrough.resolve_host.clone();
+        let ip = resolve_cached(state, &rh)
+            .await
+            .map_err(|e| format!("falha resolvendo o IP do stage ({rh}): {e}"))?;
         pcfg.passthrough.fixed_ip = Some(ip);
     }
-    // Resolve o IP de cada host extra (passthrough-only) que ainda nao tem IP fixo.
     for hc in pcfg.extra_hosts.iter_mut() {
         if hc.passthrough.fixed_ip.is_none() {
-            if let Ok(ip) = dns::resolve_direct(&hc.passthrough.resolve_host).await {
-                hc.passthrough.fixed_ip = Some(ip);
-            }
+            let rh = hc.passthrough.resolve_host.clone();
+            let ip = resolve_cached(state, &rh).await.map_err(|e| {
+                format!("falha resolvendo o IP do host extra {} ({rh}): {e}", hc.host)
+            })?;
+            hc.passthrough.fixed_ip = Some(ip);
         }
     }
     let _ = app;
     Ok(pcfg)
+}
+
+async fn resolve_cached(state: &AppState, resolve_host: &str) -> Result<IpAddr, String> {
+    if let Some(ip) = state.resolved.lock().await.get(resolve_host) {
+        return Ok(*ip);
+    }
+    let ip = dns::resolve_direct(resolve_host).await.map_err(e2s)?;
+    state.resolved.lock().await.insert(resolve_host.to_string(), ip);
+    Ok(ip)
+}
+
+/// Passthroughs resolvidos por DNS (sem IP fixo no yaml): `None` = primario,
+/// `Some(host)` = host extra; com o `resolve_host` e a porta.
+fn dynamic_targets(base: &ProxyConfig) -> Vec<(Option<String>, String, u16)> {
+    let mut v = Vec::new();
+    if base.passthrough.fixed_ip.is_none() {
+        v.push((None, base.passthrough.resolve_host.clone(), base.passthrough.port));
+    }
+    for hc in &base.extra_hosts {
+        if hc.passthrough.fixed_ip.is_none() {
+            v.push((
+                Some(hc.host.clone()),
+                hc.passthrough.resolve_host.clone(),
+                hc.passthrough.port,
+            ));
+        }
+    }
+    v
+}
+
+fn target_mut<'a>(cfg: &'a mut ProxyConfig, extra: Option<&str>) -> Option<&'a mut PassthroughTarget> {
+    match extra {
+        None => Some(&mut cfg.passthrough),
+        Some(h) => cfg
+            .extra_hosts
+            .iter_mut()
+            .find(|hc| hc.host == h)
+            .map(|hc| &mut hc.passthrough),
+    }
+}
+
+fn live_ip(cfg: &ProxyConfig, extra: Option<&str>) -> Option<IpAddr> {
+    match extra {
+        None => cfg.passthrough.fixed_ip,
+        Some(h) => cfg
+            .extra_hosts
+            .iter()
+            .find(|hc| hc.host == h)
+            .and_then(|hc| hc.passthrough.fixed_ip),
+    }
+}
+
+/// Re-resolve (DNS direto) o IP real de cada passthrough dinamico — primario e
+/// extras — atualiza o cache e, se o proxy esta vivo, troca a quente via `rcu`
+/// (sem perder edicoes de rota concorrentes). Com `check_health`, tambem troca
+/// quando o IP atual nao aceita TCP. Retorna (algo mudou?, erros por host).
+async fn reresolve_targets(
+    app: &AppHandle,
+    shared: Option<&SharedConfig>,
+    check_health: bool,
+) -> (bool, Vec<String>) {
+    let state = app.state::<AppState>();
+    let base = match base_proxy_config(&state).await {
+        Ok(b) => b,
+        Err(e) => return (false, vec![e]),
+    };
+    let mut changed = false;
+    let mut errors = Vec::new();
+    for (extra, resolve_host, port) in dynamic_targets(&base) {
+        let cur_ip = shared.and_then(|s| live_ip(&s.load(), extra.as_deref()));
+        let healthy = !check_health
+            || match cur_ip {
+                Some(ip) => tokio::time::timeout(
+                    std::time::Duration::from_secs(3),
+                    tokio::net::TcpStream::connect((ip, port)),
+                )
+                .await
+                .map(|r| r.is_ok())
+                .unwrap_or(false),
+                None => false,
+            };
+        let new_ip = match dns::resolve_direct(&resolve_host).await {
+            Ok(ip) => ip,
+            Err(e) => {
+                let name = extra.as_deref().unwrap_or(&base.intercept_host);
+                errors.push(format!("{name} ({resolve_host}): {e}"));
+                continue;
+            }
+        };
+        state.resolved.lock().await.insert(resolve_host, new_ip);
+        if let Some(shared) = shared {
+            if Some(new_ip) != cur_ip || !healthy {
+                shared.rcu(|cur| {
+                    let mut n = (**cur).clone();
+                    if let Some(t) = target_mut(&mut n, extra.as_deref()) {
+                        t.fixed_ip = Some(new_ip);
+                    }
+                    n
+                });
+                changed = true;
+            }
+        }
+    }
+    (changed, errors)
 }
 
 /// "host:port" ou "http://host:port" -> Route local.
@@ -982,29 +1318,38 @@ async fn get_request_detail(id: u64, state: State<'_, AppState>) -> Result<Reque
         .ok_or_else(|| "requisicao nao encontrada (saiu do buffer)".to_string())
 }
 
-/// Detecta servicos de dev escutando em portas comuns no 127.0.0.1.
+/// Detecta servicos de dev escutando em portas comuns no 127.0.0.1. Sonda todas
+/// as portas em paralelo: o tempo total e limitado por UM timeout.
 #[tauri::command]
 async fn detect_local_services() -> Result<Vec<LocalService>, String> {
-    let ports: [u16; 13] = [
+    const PORTS: [u16; 13] = [
         3000, 3001, 3002, 3003, 3004, 3005, 4000, 5000, 5173, 8000, 8080, 8081, 9000,
     ];
-    let mut found = Vec::new();
-    for p in ports {
-        let up = tokio::time::timeout(
-            std::time::Duration::from_millis(120),
-            tokio::net::TcpStream::connect(("127.0.0.1", p)),
-        )
-        .await
-        .map(|r| r.is_ok())
-        .unwrap_or(false);
-        if up {
-            found.push(LocalService {
-                port: p,
-                hint: hint_for_port(p),
-            });
-        }
+    let mut probes = tokio::task::JoinSet::new();
+    for p in PORTS {
+        probes.spawn(async move {
+            let up = tokio::net::TcpStream::connect(("127.0.0.1", p)).await.is_ok();
+            (p, up)
+        });
     }
-    Ok(found)
+    let mut open = Vec::new();
+    let _ = tokio::time::timeout(std::time::Duration::from_millis(150), async {
+        while let Some(res) = probes.join_next().await {
+            if let Ok((p, true)) = res {
+                open.push(p);
+            }
+        }
+    })
+    .await;
+    probes.abort_all();
+    open.sort_unstable();
+    Ok(open
+        .into_iter()
+        .map(|port| LocalService {
+            port,
+            hint: hint_for_port(port),
+        })
+        .collect())
 }
 
 fn hint_for_port(port: u16) -> Option<String> {
@@ -1041,29 +1386,32 @@ fn find_config_path(app: &AppHandle) -> Option<PathBuf> {
 }
 
 /// Recarrega o devsplit.yaml do disco no estado (mantendo o perfil ativo se ainda
-/// existir) e reaplica no proxy vivo. Usado pelo hot-reload.
-async fn reload_from_disk(app: &AppHandle) -> bool {
+/// existir) e reaplica no proxy vivo. Usado pelo hot-reload. Config invalida
+/// (parse ou host fora do RFC 1123) e recusada: o estado anterior fica intacto.
+async fn reload_from_disk(app: &AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
-    let Some(path) = find_config_path(app) else {
-        return false;
-    };
-    let Ok(cfg) = config::load(&path) else {
-        return false;
-    };
+    let path = find_config_path(app).ok_or("devsplit.yaml nao encontrado")?;
+    let cfg = load_validated(&path)?;
     let names = config::profile_names(&cfg);
     let mut profile = state.profile.lock().await.clone();
     if !names.contains(&profile) {
         profile = names.into_iter().next().unwrap_or_else(|| "default".into());
     }
-    let seeded = config::to_proxy_config(&cfg, &profile, None)
-        .map(|pc| routes_from(&pc))
-        .unwrap_or_default();
-    let routes = load_saved_routes(app, &profile).unwrap_or(seeded);
+    let routes = seeded_routes(app, &cfg, &profile);
     *state.cfg.lock().await = Some(cfg);
+    *state.cfg_error.lock().await = None;
     *state.profile.lock().await = profile;
     *state.routes.lock().await = routes;
-    let _ = reload_if_running(app, &state).await;
-    true
+    reload_if_running(app, &state).await
+}
+
+/// Rotas do perfil: o yaml define quais existem; o overlay salvo aplica os
+/// `enabled`, as rotas do usuario e as remocoes feitas pela UI.
+fn seeded_routes(app: &AppHandle, cfg: &DevsplitConfig, profile: &str) -> Vec<RouteDto> {
+    let seeded = config::to_proxy_config(cfg, profile, None)
+        .map(|pc| routes_from(&pc))
+        .unwrap_or_default();
+    merge_routes(seeded, load_overlay(app, profile))
 }
 
 fn load_config_into_state(app: &AppHandle) {
@@ -1083,24 +1431,27 @@ fn load_config_into_state(app: &AppHandle) {
     if let Ok(dir) = app.path().app_config_dir() {
         candidates.push(dir.join("devsplit.yaml"));
     }
-    for path in candidates {
-        if let Ok(cfg) = config::load(&path) {
-            let profile = config::profile_names(&cfg)
-                .into_iter()
-                .next()
-                .unwrap_or_else(|| "default".into());
-            // semeia as rotas do perfil (ou usa as salvas no estado, se houver)
-            let seeded = config::to_proxy_config(&cfg, &profile, None)
-                .map(|pc| routes_from(&pc))
-                .unwrap_or_default();
-            let routes = load_saved_routes(app, &profile).unwrap_or(seeded);
-            tauri::async_runtime::block_on(async {
-                *state.cfg.lock().await = Some(cfg);
-                *state.profile.lock().await = profile;
-                *state.routes.lock().await = routes;
-            });
-            break;
-        }
+    for path in candidates.into_iter().filter(|p| p.exists()) {
+        // O primeiro devsplit.yaml achado decide: se for invalido (ex.: host
+        // fora do RFC 1123) a config inteira e recusada com o motivo, sem cair
+        // silenciosamente p/ outro arquivo.
+        let loaded = load_validated(&path);
+        tauri::async_runtime::block_on(async {
+            match loaded {
+                Ok(cfg) => {
+                    let profile = config::profile_names(&cfg)
+                        .into_iter()
+                        .next()
+                        .unwrap_or_else(|| "default".into());
+                    let routes = seeded_routes(app, &cfg, &profile);
+                    *state.cfg.lock().await = Some(cfg);
+                    *state.profile.lock().await = profile;
+                    *state.routes.lock().await = routes;
+                }
+                Err(e) => *state.cfg_error.lock().await = Some(format!("devsplit.yaml recusado: {e}")),
+            }
+        });
+        break;
     }
 }
 
@@ -1132,7 +1483,12 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
                     };
                 });
             }
-            "quit" => app.exit(0),
+            "quit" => {
+                // Saida real (teardown completo); fechar a janela so esconde.
+                if begin_teardown() {
+                    tauri::async_runtime::spawn(teardown_and_exit(app.clone()));
+                }
+            }
             _ => {}
         });
     if let Some(icon) = app.default_window_icon().cloned() {
@@ -1147,7 +1503,8 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
 async fn ensure_ca_installed(app: &AppHandle) -> Result<String, String> {
     let caroot = caroot(app)?;
     tlsca::ensure_ca(&caroot).map_err(e2s)?;
-    let mkcert = which("mkcert").ok_or("binario 'mkcert' nao encontrado — instale o mkcert")?;
+    let mkcert = which::which("mkcert")
+        .map_err(|_| "binario 'mkcert' nao encontrado — instale o mkcert".to_string())?;
     let out = tokio::task::spawn_blocking(move || {
         std::process::Command::new(&mkcert)
             .env("CAROOT", &caroot)
@@ -1174,7 +1531,7 @@ async fn uninstall_ca(app: &AppHandle) -> Result<(), String> {
     if !caroot.join("rootCA.pem").exists() {
         return Ok(());
     }
-    let Some(mkcert) = which("mkcert") else {
+    let Ok(mkcert) = which::which("mkcert") else {
         return Ok(());
     };
     let out = tokio::task::spawn_blocking(move || {
@@ -1200,23 +1557,47 @@ async fn install_cert(app: AppHandle) -> Result<String, String> {
     ensure_ca_installed(&app).await
 }
 
-/// Re-resolve o IP real do stage via DNS direto e aplica a quente (botao da UI).
+/// Re-resolve o IP real do stage E de cada host extra via DNS direto e aplica a
+/// quente (botao da UI). Falha nomeando os hosts que nao resolveram.
 #[tauri::command]
-async fn reresolve_upstream(state: State<'_, AppState>) -> Result<StatusDto, String> {
+async fn reresolve_upstream(app: AppHandle, state: State<'_, AppState>) -> Result<StatusDto, String> {
     let pcfg = base_proxy_config(&state).await?;
-    let ip = dns::resolve_direct(&pcfg.passthrough.resolve_host)
-        .await
-        .map_err(|e| format!("falha resolvendo o IP do stage: {e}"))?;
-    *state.resolved_ip.lock().await = Some(ip);
-    let running = *state.running.lock().await;
-    if running {
-        if let Some(shared) = state.shared.lock().await.as_ref() {
-            let mut next = (*shared.load_full()).clone();
-            next.passthrough.fixed_ip = Some(ip);
-            shared.store(Arc::new(next));
-        }
+    let shared = state.shared.lock().await.clone();
+    let (_changed, errors) = reresolve_targets(&app, shared.as_ref(), false).await;
+    if !errors.is_empty() {
+        return Err(format!("falha resolvendo IP: {}", errors.join("; ")));
     }
-    Ok(status_dto(&pcfg, running))
+    let running = *state.running.lock().await;
+    let status = status_dto(&pcfg, running);
+    let _ = app.emit("proxy://status", status.clone());
+    Ok(status)
+}
+
+/// Encerra limpo em SIGTERM (systemd/logout/`kill`), SIGINT (Ctrl+C no terminal)
+/// e SIGHUP (terminal fechado): mesmo teardown do "Sair" (reverte /etc/hosts +
+/// retira a CA). Limite conhecido: SIGKILL/OOM-kill nao podem ser capturados por
+/// nenhum processo — nesse caso o bloco fica no /etc/hosts ate o doctor/"Limpar"
+/// ou o proximo ligar/desligar.
+#[cfg(unix)]
+fn spawn_signal_teardown(app: AppHandle) {
+    use tokio::signal::unix::{signal, SignalKind};
+    tauri::async_runtime::spawn(async move {
+        let (Ok(mut term), Ok(mut int), Ok(mut hup)) = (
+            signal(SignalKind::terminate()),
+            signal(SignalKind::interrupt()),
+            signal(SignalKind::hangup()),
+        ) else {
+            return;
+        };
+        tokio::select! {
+            _ = term.recv() => {}
+            _ = int.recv() => {}
+            _ = hup.recv() => {}
+        }
+        if begin_teardown() {
+            teardown_and_exit(app).await;
+        }
+    });
 }
 
 pub fn run() {
@@ -1227,16 +1608,29 @@ pub fn run() {
                 let _ = w.set_focus();
             }
         }))
-        .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
         ))
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_fs::init())
         .manage(AppState::default())
+        .on_window_event(|window, event| {
+            // Fechar a janela principal so esconde: o tray e a fonte de verdade
+            // do on/off; "Sair" no tray faz o teardown de verdade.
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "main" {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
         .setup(|app| {
             let handle = app.handle().clone();
             load_config_into_state(&handle);
             build_tray(&handle)?;
+            #[cfg(unix)]
+            spawn_signal_teardown(handle.clone());
             // Hot-reload: observa o devsplit.yaml e aplica ao salvar / git pull.
             let watch = handle.clone();
             tauri::async_runtime::spawn(async move {
@@ -1251,14 +1645,21 @@ pub fn run() {
                     match (last, m) {
                         (Some(prev), Some(now)) if prev != now => {
                             last = Some(now);
-                            if reload_from_disk(&watch).await {
-                                let _ = watch.emit(
-                                    "proxy://notice",
-                                    Notice {
-                                        level: "info",
-                                        message: "devsplit.yaml recarregado".into(),
-                                    },
-                                );
+                            let notice = match reload_from_disk(&watch).await {
+                                Ok(()) => Notice {
+                                    level: "info",
+                                    message: "devsplit.yaml recarregado".into(),
+                                },
+                                Err(e) => Notice {
+                                    level: "error",
+                                    message: format!("devsplit.yaml nao recarregado: {e}"),
+                                },
+                            };
+                            let _ = watch.emit("proxy://notice", notice);
+                            let state = watch.state::<AppState>();
+                            if let Ok(pcfg) = base_proxy_config(&state).await {
+                                let running = *state.running.lock().await;
+                                let _ = watch.emit("proxy://status", status_dto(&pcfg, running));
                             }
                         }
                         (None, Some(now)) => last = Some(now),
@@ -1288,23 +1689,17 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("erro ao iniciar o devsplit");
 
-    // Teardown ao fechar (janela X ou tray "Sair"): nada pode ficar ativo depois
-    // (reverte /etc/hosts + retira a CA do navegador). prevent_exit segura a saida
-    // p/ o teardown async rodar; depois exit(0) real. A guarda evita loop infinito
-    // (o exit(0) re-dispara ExitRequested).
-    let cleaning = std::sync::atomic::AtomicBool::new(false);
-    app.run(move |app_handle, event| {
+    // Qualquer pedido de saida (tray "Sair", app.exit de outro caminho) passa pelo
+    // teardown: nada pode ficar ativo depois (reverte /etc/hosts + retira a CA do
+    // navegador). prevent_exit segura a saida p/ o teardown async rodar; depois
+    // exit(0) real, que re-dispara ExitRequested ja com TEARING_DOWN setado.
+    app.run(|app_handle, event| {
         if let tauri::RunEvent::ExitRequested { api, .. } = event {
-            if cleaning.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            if !begin_teardown() {
                 return;
             }
             api.prevent_exit();
-            let app_handle = app_handle.clone();
-            tauri::async_runtime::spawn(async move {
-                let state = app_handle.state::<AppState>();
-                shutdown_runtime(&app_handle, &state).await;
-                app_handle.exit(0);
-            });
+            tauri::async_runtime::spawn(teardown_and_exit(app_handle.clone()));
         }
     });
 }
