@@ -7,6 +7,7 @@ import { Card, CardHeader } from "../components/Card.tsx";
 import { Badge } from "../components/Badge.tsx";
 
 const POLL_MS = 1500;
+const MAX_PENDING_IDS = 40;
 
 function claimValue(v: unknown): string {
   if (Array.isArray(v)) return v.join(", ");
@@ -32,14 +33,17 @@ export function SessionView() {
   const [decoded, setDecoded] = useState<JwtDecoded | null>(null);
   const [unauthorized, setUnauthorized] = useState<TrafficEntry[]>([]);
   const [now, setNow] = useState(() => Date.now());
-  const latestIdRef = useRef<number | null>(null);
+  const pendingIdsRef = useRef<number[]>([]);
   const rawRef = useRef<string | null>(null);
 
-  // Track newest request id + collect 401/403 from the live stream.
+  // Track ids seen since the last poll tick + collect 401/403 from the live stream.
   useEffect(() => {
     return subscribe(
       ipc.onTraffic((e) => {
-        latestIdRef.current = e.id;
+        pendingIdsRef.current = [e.id, ...pendingIdsRef.current].slice(
+          0,
+          MAX_PENDING_IDS,
+        );
         if (e.status === 401 || e.status === 403) {
           setUnauthorized((prev) => [e, ...prev].slice(0, 20));
         }
@@ -47,30 +51,42 @@ export function SessionView() {
     );
   }, []);
 
-  // Poll the latest request's detail for a Bearer token and decode it.
+  // Poll for a Bearer token: scan ids newest-first so a request without
+  // Authorization (e.g. an unauthenticated /health poll) never hides a
+  // token seen moments earlier — only stop once the newest id WITH an
+  // Authorization header has been resolved (same token or a fresher one).
   useEffect(() => {
     let active = true;
     let busy = false;
     const tick = async () => {
       if (busy) return;
-      const id = latestIdRef.current;
-      if (id === null) return;
+      const ids = pendingIdsRef.current;
+      if (ids.length === 0) return;
+      pendingIdsRef.current = [];
       busy = true;
       try {
-        const detail = await ipc.getRequestDetail(id);
-        if (!active) return;
-        const auth = detail.reqHeaders.find(
-          ([k]) => k.toLowerCase() === "authorization",
-        );
-        if (!auth) return;
-        const match = auth[1].match(/^Bearer\s+(.+)$/i);
-        const token = match ? match[1] : null;
-        if (token && token !== rawRef.current) {
-          const dec = decodeJwt(token);
-          if (dec) {
-            rawRef.current = token;
-            setDecoded(dec);
+        for (const id of ids) {
+          if (!active) return;
+          let detail;
+          try {
+            detail = await ipc.getRequestDetail(id);
+          } catch {
+            continue; // evicted from the ring buffer; try an older id
           }
+          const auth = detail.reqHeaders.find(
+            ([k]) => k.toLowerCase() === "authorization",
+          );
+          if (!auth) continue;
+          const match = auth[1].match(/^Bearer\s+(.+)$/i);
+          const token = match ? match[1] : null;
+          if (token && token !== rawRef.current) {
+            const dec = decodeJwt(token);
+            if (dec) {
+              rawRef.current = token;
+              setDecoded(dec);
+            }
+          }
+          break; // newest id with an Authorization header resolved; stop
         }
       } finally {
         busy = false;
